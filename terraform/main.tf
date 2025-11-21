@@ -106,7 +106,7 @@ resource "aws_instance" "app_server" {
               git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ec2-user/app
               cd /home/ec2-user/app
               pip3 install -r requirements.txt
-              nohup streamlit run app.py &
+              nohup streamlit run app.py --server.address=0.0.0.0 --server.port=8501 &
               EOF
 
   tags = {
