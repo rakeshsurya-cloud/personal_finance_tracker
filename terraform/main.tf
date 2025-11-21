@@ -65,11 +65,38 @@ resource "aws_security_group" "finance_app_sg" {
   }
 }
 
+# IAM Role for SSM access (so you can connect without SSH)
+resource "aws_iam_role" "ssm_role" {
+  name = "finance-app-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_policy" {
+  role       = aws_iam_role.ssm_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_instance_profile" "ssm_profile" {
+  name = "finance-app-ssm-profile"
+  role = aws_iam_role.ssm_role.name
+}
+
 resource "aws_instance" "app_server" {
   ami           = data.aws_ami.amazon_linux.id  # Automatically uses the right AMI for your region
   instance_type = "t3.micro"  # Free-tier eligible in us-west-2
   key_name      = "finance-app-key" # Make sure to create this key pair in AWS Console first!
   
+  iam_instance_profile = aws_iam_instance_profile.ssm_profile.name
   security_groups = [aws_security_group.finance_app_sg.name]
 
   user_data = <<-EOF
