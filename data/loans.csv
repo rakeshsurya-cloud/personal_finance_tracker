@@ -1,0 +1,4 @@
+Date,Lender,LoanType,Principal,InterestRateAPR,TermMonths,PaymentAmount,Balance,Notes
+2023-08-01,Axis Bank,Gold,12000,10.50,36,400,7800,Ornament loan
+2021-09-15,SBI,Education,25000,6.00,120,277,12000,MS tuition
+2024-06-01,Any Lender,Other,5000,12.00,24,235,3520,Personal loan
