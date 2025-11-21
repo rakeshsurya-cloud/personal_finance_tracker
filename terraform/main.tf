@@ -122,15 +122,19 @@ resource "aws_instance" "app_server" {
   user_data = <<-EOF
               #!/bin/bash
               dnf update -y
-              dnf install -y python3 python3-pip git amazon-ssm-agent
+              dnf install -y python3.11 python3.11-pip git amazon-ssm-agent
 
               systemctl enable amazon-ssm-agent
               systemctl start amazon-ssm-agent
 
               git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ec2-user/app
               cd /home/ec2-user/app
-              pip3 install -r requirements.txt
-              nohup streamlit run app.py --server.address=0.0.0.0 --server.port=8501 &
+              
+              # Install dependencies with Python 3.11
+              python3.11 -m pip install -r requirements.txt
+              
+              # Run app with Python 3.11
+              nohup python3.11 -m streamlit run app.py --server.address=0.0.0.0 --server.port=8501 &
               EOF
 
   tags = {
