@@ -37,9 +37,22 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
+# Get the default VPC
+data "aws_vpc" "default" {
+  default = true
+}
+
+# Get a public subnet in the default VPC
+data "aws_subnet" "default" {
+  vpc_id            = data.aws_vpc.default.id
+  availability_zone = "us-west-2a"
+  default_for_az    = true
+}
+
 resource "aws_security_group" "finance_app_sg" {
   name        = "finance_app_sg"
   description = "Allow SSH and Streamlit traffic"
+  vpc_id      = data.aws_vpc.default.id
 
   ingress {
     description = "SSH"
@@ -96,8 +109,10 @@ resource "aws_instance" "app_server" {
   instance_type = "t3.micro"  # Free-tier eligible in us-west-2
   key_name      = "finance-app-key" # Make sure to create this key pair in AWS Console first!
   
-  iam_instance_profile = aws_iam_instance_profile.ssm_profile.name
-  security_groups = [aws_security_group.finance_app_sg.name]
+  iam_instance_profile   = aws_iam_instance_profile.ssm_profile.name
+  subnet_id              = data.aws_subnet.default.id
+  vpc_security_group_ids = [aws_security_group.finance_app_sg.id]
+  associate_public_ip_address = true
 
   user_data = <<-EOF
               #!/bin/bash
