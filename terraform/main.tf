@@ -121,8 +121,12 @@ resource "aws_instance" "app_server" {
 
   user_data = <<-EOF
               #!/bin/bash
-              sudo yum update -y
-              sudo yum install -y python3 python3-pip git
+              dnf update -y
+              dnf install -y python3 python3-pip git amazon-ssm-agent
+
+              systemctl enable amazon-ssm-agent
+              systemctl start amazon-ssm-agent
+
               git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ec2-user/app
               cd /home/ec2-user/app
               pip3 install -r requirements.txt
