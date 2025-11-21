@@ -67,7 +67,7 @@ resource "aws_security_group" "finance_app_sg" {
 
 resource "aws_instance" "app_server" {
   ami           = data.aws_ami.amazon_linux.id  # Automatically uses the right AMI for your region
-  instance_type = "t2.micro"
+  instance_type = "t3.micro"  # Free-tier eligible in us-west-2
   key_name      = "finance-app-key" # Make sure to create this key pair in AWS Console first!
   
   security_groups = [aws_security_group.finance_app_sg.name]
