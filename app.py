@@ -108,10 +108,18 @@ with st.sidebar:
         st.header("Settings")
         if st.button("Clear All Data"):
             # Dangerous button to clear data
-            for f in DATA_DIR.glob("*"):
-                f.unlink()
-            if CATEGORIZED_CSV.exists():
-                CATEGORIZED_CSV.unlink()
+            # Note: This implementation currently only clears local files.
+            # To support S3, we would need to add delete capabilities to storage.py
+            
+            local_data_dir = Path(f"personal_finance_tracker/{DATA_DIR}")
+            if local_data_dir.exists():
+                for f in local_data_dir.glob("*"):
+                    f.unlink()
+            
+            local_output_file = Path(f"personal_finance_tracker/{OUTPUT_DIR}/{CATEGORIZED_FILE}")
+            if local_output_file.exists():
+                local_output_file.unlink()
+                
             st.warning("All data cleared.")
             st.experimental_rerun()
     else:
