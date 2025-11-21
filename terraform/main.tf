@@ -21,6 +21,22 @@ provider "aws" {
   region = "us-west-2"
 }
 
+# Automatically fetch the latest Amazon Linux 2023 AMI for the current region
+data "aws_ami" "amazon_linux" {
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_security_group" "finance_app_sg" {
   name        = "finance_app_sg"
   description = "Allow SSH and Streamlit traffic"
@@ -50,7 +66,7 @@ resource "aws_security_group" "finance_app_sg" {
 }
 
 resource "aws_instance" "app_server" {
-  ami           = "ami-053b0d53c279acc90" # Ubuntu 22.04 LTS (us-east-1)
+  ami           = data.aws_ami.amazon_linux.id  # Automatically uses the right AMI for your region
   instance_type = "t2.micro"
   key_name      = "finance-app-key" # Make sure to create this key pair in AWS Console first!
   
@@ -58,10 +74,10 @@ resource "aws_instance" "app_server" {
 
   user_data = <<-EOF
               #!/bin/bash
-              sudo apt-get update
-              sudo apt-get install -y python3-pip git
-              git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ubuntu/app
-              cd /home/ubuntu/app
+              sudo yum update -y
+              sudo yum install -y python3 python3-pip git
+              git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ec2-user/app
+              cd /home/ec2-user/app
               pip3 install -r requirements.txt
               nohup streamlit run app.py &
               EOF
