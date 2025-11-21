@@ -114,6 +114,11 @@ resource "aws_instance" "app_server" {
   vpc_security_group_ids = [aws_security_group.finance_app_sg.id]
   associate_public_ip_address = true
 
+  root_block_device {
+    volume_size = 20  # Increase from default 8GB to 20GB (still free tier)
+    volume_type = "gp3"
+  }
+
   user_data = <<-EOF
               #!/bin/bash
               sudo yum update -y
