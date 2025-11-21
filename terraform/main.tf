@@ -133,8 +133,11 @@ resource "aws_instance" "app_server" {
               # Install dependencies with Python 3.11
               python3.11 -m pip install -r requirements.txt
               
-              # Run app with Python 3.11
-              nohup python3.11 -m streamlit run app.py --server.address=0.0.0.0 --server.port=8501 &
+              # Setup Systemd Service
+              cp finance-app.service /etc/systemd/system/finance-app.service
+              systemctl daemon-reload
+              systemctl enable finance-app
+              systemctl start finance-app
               EOF
 
   tags = {
