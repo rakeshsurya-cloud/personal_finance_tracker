@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Finance Tracker Streamlit App
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/app
+ExecStart=/home/ec2-user/.local/bin/streamlit run app.py --server.address=0.0.0.0 --server.port=8501
+Restart=always
+RestartSec=5
+StandardOutput=file:/var/log/finance-app.log
+StandardError=file:/var/log/finance-app.error.log
+
+[Install]
+WantedBy=multi-user.target
