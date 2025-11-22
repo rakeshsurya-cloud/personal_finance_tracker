@@ -7,7 +7,7 @@ terraform {
   #     name = "finance-tracker-prod"
   #   }
   # }
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -105,17 +105,17 @@ resource "aws_iam_instance_profile" "ssm_profile" {
 }
 
 resource "aws_instance" "app_server" {
-  ami           = data.aws_ami.amazon_linux.id  # Automatically uses the right AMI for your region
-  instance_type = "t3.micro"  # Free-tier eligible in us-west-2
-  key_name      = "finance-app-key" # Make sure to create this key pair in AWS Console first!
-  
-  iam_instance_profile   = aws_iam_instance_profile.ssm_profile.name
-  subnet_id              = data.aws_subnet.default.id
-  vpc_security_group_ids = [aws_security_group.finance_app_sg.id]
+  ami           = data.aws_ami.amazon_linux.id # Automatically uses the right AMI for your region
+  instance_type = "t3.micro"                   # Free-tier eligible in us-west-2
+  key_name      = "finance-app-key"            # Make sure to create this key pair in AWS Console first!
+
+  iam_instance_profile        = aws_iam_instance_profile.ssm_profile.name
+  subnet_id                   = data.aws_subnet.default.id
+  vpc_security_group_ids      = [aws_security_group.finance_app_sg.id]
   associate_public_ip_address = true
 
   root_block_device {
-    volume_size = 20  # Increase from default 8GB to 20GB (still free tier)
+    volume_size = 30 # Increase to 30GB (minimum for this AMI, still free tier limit)
     volume_type = "gp3"
   }
 
