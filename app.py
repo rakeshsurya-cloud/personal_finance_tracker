@@ -432,12 +432,92 @@ def load_data():
 # --- Main App ---
 st.title(f"💰 Family Finance Tracker ({st.session_state['role'].title()} Mode)")
 
+
+
+# Sidebar
+with st.sidebar:
+    st.header("Data Management")
+    
+    if is_admin():
+        # File Upload
+        uploaded_files = st.file_uploader(
+            "Upload Bank CSVs",
+            type=["csv"],
+            accept_multiple_files=True,
+            help="Upload transaction CSV files from your bank"
+        )
+        
+        if uploaded_files:
+            saved_paths = []
+            for uploaded_file in uploaded_files:
+                path = Path("temp") / uploaded_file.name
+                path.parent.mkdir(exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                saved_paths.append(path)
+            
+            # Process
+            with st.spinner("Processing..."):
+                try:
+                    df_new = process_files(saved_paths, str(MODEL_PATH))
+                    if not df_new.empty:
+                        count = save_to_db(df_new, get_db())
+                        st.success(f"Imported {count} new transactions!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.warning("No valid transactions found.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                finally:
+                    # Cleanup
+                    for p in saved_paths:
+                        p.unlink()
+        
+        st.divider()
+        
+        # Plaid Connection
+        st.subheader("🏦 Connect Bank (Plaid)")
+        if st.button("Connect Bank Account", use_container_width=True):
+            try:
+                link_token = create_link_token()
+                if link_token:
+                    st.info("Open plaid_test.html in your browser to complete connection")
+                    st.code(f"Link Token: {link_token}", language="text")
+                else:
+                    st.error("Failed to create link token")
+            except Exception as e:
+                st.error(f"Error: {e}")
+        
+        public_token = st.text_input("Paste Public Token from Plaid Link", key="plaid_public_token")
+        if st.button("Exchange Token", use_container_width=True) and public_token:
+            try:
+                access_token = exchange_public_token(public_token)
+                if access_token:
+                    st.success("Connected! Fetching transactions...")
+                    txns = fetch_transactions(access_token)
+                    if txns:
+                        st.success(f"Fetched {len(txns)} transactions")
+                        # Save to database logic here
+                    else:
+                        st.warning("No transactions found")
+                else:
+                    st.error("Failed to exchange token")
+            except Exception as e:
+                st.error(f"Error: {e}")
+    
+    st.divider()
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
+# Load Data
+df = load_data()
 if not df.empty:
     df_prep = _prep(df)
 else:
     df_prep = pd.DataFrame()
 
-# Tabs
 # Tabs (removed Connect tab - moved to sidebar)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "💳 Transactions", "💸 Loans", "📅 Fixed Expenses", "🧠 Insights"])
 
