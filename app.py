@@ -574,8 +574,6 @@ if not is_admin():
 
 # Sidebar
 with st.sidebar:
-    db_sidebar = get_db()
-
     st.header("Access & Roles")
     st.markdown("Admins can view and edit all data. Family users only see records marked as **Shared**, controlled by the `IsShared` column.")
     if st.session_state.get("role") == "admin":
