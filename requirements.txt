@@ -10,3 +10,6 @@ openpyxl
 boto3
 pytest
 flake8
+fastapi
+uvicorn
+pydantic
