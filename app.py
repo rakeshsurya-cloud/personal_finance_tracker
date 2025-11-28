@@ -16,7 +16,20 @@ from process_transactions import process_files, save_to_db
 from plaid_integration import create_link_token, exchange_public_token, fetch_transactions
 from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_worth_trend
 from loans import _prep_loans, simulate_payoff
-from insights import detect_anomalies, predict_spending
+from insights import (
+    assistant_response,
+    auto_categorize_transactions,
+    build_personalized_budget,
+    compute_highlights,
+    detect_anomalies,
+    forecast_cash_flow,
+    generate_predictive_nudges,
+    generate_actionable_tips,
+    goal_savings_plan,
+    predict_spending,
+    summarize_budget_watch,
+    track_budget_progress,
+)
 
 # --- Configuration ---
 st.set_page_config(page_title="Family Finance Tracker", layout="wide", page_icon="💰")
@@ -585,6 +598,7 @@ with st.sidebar:
     st.header("Data Management")
 
     if is_admin():
+        db_sidebar = get_db()
         # File Upload
         uploaded_files = st.file_uploader(
             "Upload Bank CSVs",
@@ -965,22 +979,175 @@ with tab3:
 
 with tab5:
     st.header("🧠 Smart Insights")
-    
-    if not df_prep.empty:
-        from insights import generate_actionable_tips
-        tips = generate_actionable_tips(df_prep)
-        
+
+    if df_prep.empty:
+        st.info("Need transaction data to generate insights.")
+    else:
+        st.caption("AI categorization, proactive budgets, anomaly detection, cashflow forecasts, and a goal-aware assistant.")
+
+        col_range, _ = st.columns([3, 1])
+        with col_range:
+            window_label = st.selectbox(
+                "Timeframe",
+                ["Last 90 days", "Last 180 days", "Year to date", "All data"],
+                index=1,
+                help="Insights will be generated from this window."
+            )
+
+        filtered_df = df_prep.copy()
+        cutoff = None
+        today = filtered_df["Date"].max()
+        if window_label == "Last 90 days":
+            cutoff = today - pd.Timedelta(days=90)
+        elif window_label == "Last 180 days":
+            cutoff = today - pd.Timedelta(days=180)
+        elif window_label == "Year to date":
+            cutoff = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
+
+        if cutoff:
+            filtered_df = filtered_df[filtered_df["Date"] >= cutoff]
+
+        if filtered_df.empty:
+            st.info("No data in the selected window. Try expanding the timeframe.")
+            st.stop()
+
+
+        # Automated Categorization
+        st.subheader("🤖 Automated Categorization")
+        feedback_map = st.session_state.get("category_feedback", {})
+        suggestions = auto_categorize_transactions(filtered_df, MODEL_PATH, feedback_map)
+        if not suggestions.empty:
+            st.dataframe(suggestions, use_container_width=True)
+            with st.form("categorization_feedback"):
+                choice = st.selectbox("Pick a transaction to correct", suggestions["Description"].unique())
+                corrected = st.text_input("Correct category")
+                if st.form_submit_button("Save correction") and corrected:
+                    feedback_map[choice] = corrected
+                    st.session_state["category_feedback"] = feedback_map
+                    st.success("Saved. Future suggestions will learn this correction.")
+                    st.rerun()
+        else:
+            st.success("All transactions are categorized with confidence.")
+
+        highlights = compute_highlights(filtered_df)
+        st.subheader("Highlights")
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Income", f"${highlights['income']:,.0f}", help=f"Latest month: {highlights['month']}")
+        h2.metric("Spend", f"${highlights['spend']:,.0f}")
+        h3.metric("Net Cashflow", f"${highlights['net']:,.0f}", delta_color="normal")
+        top_cat = highlights.get("top_category") or "—"
+        top_val = highlights.get("top_category_spend", 0)
+        h4.metric("Top Category", top_cat, delta=f"-${top_val:,.0f}" if top_cat != "—" else None)
+
+        st.subheader("Actionable Tips")
+        tips = generate_actionable_tips(filtered_df)
         if tips:
             for tip in tips:
-                st.markdown(f"""
-                <div style="padding:15px; background-color:#f0f2f6; border-radius:10px; margin-bottom:10px">
-                    {tip}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div style="padding:15px; background-color:#f8fafc; border-radius:10px; margin-bottom:10px; border:1px solid #e2e8f0">{tip}</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
         else:
             st.success("✅ Your finances look stable! No alerts this month.")
-            
+
+        # Budgeting and goals
+        st.subheader("📊 Personalized Budget & Goal Tracking")
+        cashflow_projection = []
+        fixed_expenses_all = db_session.query(FixedExpense).all()
+        fixed_visible = [e for e in fixed_expenses_all if is_admin() or e.is_shared]
+        cashflow_projection = forecast_cash_flow(filtered_df, fixed_visible)
+
+        goal_commitments = []
+        goal_plan = None
+        with st.expander("Plan a savings goal"):
+            with st.form("goal_planner"):
+                goal_name = st.text_input("Goal name", value="Down payment")
+                goal_amount = st.number_input("Target amount", min_value=0.0, step=1000.0, value=10000.0)
+                target_date = st.date_input("Target date")
+                saved_so_far = st.number_input("Already saved", min_value=0.0, step=100.0, value=0.0)
+                plan_submitted = st.form_submit_button("Create plan")
+
+            if plan_submitted:
+                target_dt = datetime.combine(target_date, datetime.min.time())
+                goal_plan = goal_savings_plan(goal_name, goal_amount, target_dt, saved_so_far, cashflow_projection)
+                goal_commitments = [goal_plan]
+                st.success(
+                    f"Save about ${goal_plan['required_monthly']:,.0f}/mo (safe ${goal_plan['safe_monthly']:,.0f}) to hit {goal_plan['goal']} in {goal_plan['months_remaining']} months."
+                )
+
+        suggested_budget = build_personalized_budget(filtered_df, savings_rate=0.18, goal_commitments=goal_commitments)
+        budget_progress = track_budget_progress(filtered_df, suggested_budget["budgets"])
+        if suggested_budget["budgets"]:
+            st.caption(f"Suggested monthly savings target: ${suggested_budget['savings_target']:,.0f} based on ${suggested_budget['income_avg']:,.0f} average income.")
+            st.dataframe(pd.DataFrame(suggested_budget["budgets"]).rename(columns={"avg_spend": "Avg Spend", "suggested_limit": "Suggested Limit"}), use_container_width=True)
+        if budget_progress:
+            st.markdown("**Live budget tracking**")
+            progress_df = pd.DataFrame(budget_progress)
+            st.dataframe(progress_df[["category", "limit", "spent", "remaining", "pct", "is_over"]], use_container_width=True)
+            budget_alerts = summarize_budget_watch(budget_progress)
+            for alert in budget_alerts:
+                st.warning(alert)
+
+        st.subheader("Anomalies & Unusual Activity")
+        anomalies = detect_anomalies(filtered_df, budget_progress)
+        if anomalies["spikes"] is not None and not anomalies["spikes"].empty:
+            show_cols = ["Date", "Description", "Amount", "Category"]
+            st.dataframe(anomalies["spikes"][show_cols].assign(Amount=anomalies["spikes"]["Amount"].abs()), use_container_width=True)
+            st.caption("Transactions more than 2 standard deviations from your normal spend.")
+        else:
+            st.info("No suspicious spikes detected in the selected window.")
+
+        if anomalies["duplicates"] is not None and not anomalies["duplicates"].empty:
+            st.warning("Possible duplicate charges detected this week:")
+            st.dataframe(anomalies["duplicates"][show_cols].assign(Amount=anomalies["duplicates"]["Amount"].abs()), use_container_width=True)
+
+        if anomalies["overspend_risk"]:
+            for msg in anomalies["overspend_risk"]:
+                st.warning(msg)
+
         st.subheader("🔮 Spending Forecast")
-        st.plotly_chart(predict_spending(df_prep), use_container_width=True)
-    else:
-        st.info("Need transaction data to generate insights.")
+        forecast = predict_spending(filtered_df)
+        st.plotly_chart(forecast["figure"], use_container_width=True)
+        st.caption(forecast.get("summary", ""))
+        if forecast.get("forecast_month"):
+            st.caption(f"Next update based on data through {forecast['forecast_month']} (refreshed {forecast['updated_at']:%Y-%m-%d %H:%M UTC}).")
+
+        st.subheader("💵 Cash Flow Outlook")
+        if cashflow_projection:
+            cf_df = pd.DataFrame(cashflow_projection)
+            cf_df["horizon"] = cf_df["horizon_days"].astype(str) + " days"
+            st.dataframe(cf_df[["horizon", "projected_net", "recurring", "ending_balance"]], use_container_width=True)
+            st.caption("Blend of recent daily net flows and scheduled recurring expenses across 30/60/90 days.")
+        else:
+            st.info("Add more transaction history to project cash flow.")
+
+        nudges = generate_predictive_nudges(filtered_df, anomalies, budget_progress, cashflow_projection)
+        if nudges:
+            st.subheader("🎯 Predictive Nudges")
+            for nudge in nudges:
+                st.info(nudge)
+
+        st.subheader("💬 AI Insights Assistant")
+        with st.form("insights_assistant"):
+            prompt = st.text_area(
+                "Ask a question about your money",
+                placeholder="e.g., How much can I safely save this week?",
+                help="Uses on-page data only; no external calls.",
+            )
+            submitted = st.form_submit_button("Ask the Assistant")
+
+        if submitted:
+            response = assistant_response(filtered_df, prompt, budget_progress, forecast, anomalies, cashflow_projection, goal_plan)
+            formatted_response = response.replace("\n", "<br>")
+            st.markdown(
+                f"""
+                <div style="padding:15px; background-color:#eef2ff; border-radius:10px; border:1px solid #c7d2fe">
+                    {formatted_response}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("Try asking: • What category is pacing over budget? • How much can I save without causing a shortfall? • Any duplicate charges to dispute?")
