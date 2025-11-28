@@ -1,14 +1,24 @@
 output "instance_id" {
   description = "ID of the EC2 instance"
-  value       = aws_instance.app_server.id
+  value       = module.compute.instance_id
 }
 
 output "public_ip" {
   description = "Public IP address of the EC2 instance"
-  value       = aws_instance.app_server.public_ip
+  value       = module.compute.public_ip
 }
 
 output "app_url" {
   description = "URL to access the application"
-  value       = "http://${aws_instance.app_server.public_ip}:8501"
+  value       = module.compute.app_url
+}
+
+output "db_endpoint" {
+  description = "RDS PostgreSQL endpoint (not publicly accessible)"
+  value       = module.database.db_endpoint
+}
+
+output "db_master_username" {
+  description = "Master username for the RDS instance"
+  value       = module.database.db_master_username
 }
