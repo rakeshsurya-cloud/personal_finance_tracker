@@ -592,6 +592,7 @@ with st.sidebar:
     st.header("Data Management")
 
     if is_admin():
+        db_sidebar = get_db()
         # File Upload
         uploaded_files = st.file_uploader(
             "Upload Bank CSVs",
