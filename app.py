@@ -497,8 +497,7 @@ def sync_plaid_transactions(item: PlaidItem, share_with_family: bool = True):
     has_more = True
 
     while has_more:
-        resp = fetch_transactions(item.access_token, cursor=cursor)
-        resp_data = resp.to_dict() if hasattr(resp, "to_dict") else resp
+        resp_data = fetch_transactions(item.access_token, cursor=cursor)
 
         added = resp_data.get("added", [])
         has_more = resp_data.get("has_more", False)
