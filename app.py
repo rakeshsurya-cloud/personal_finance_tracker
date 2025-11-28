@@ -6,11 +6,12 @@ import os
 import sys
 import bcrypt
 import time
+from datetime import datetime
 
 # Add current directory to path
 sys.path.append(str(Path(__file__).parent))
 
-from database import SessionLocal, User, Transaction, Loan, FixedExpense
+from database import SessionLocal, User, Transaction, Loan, FixedExpense, PlaidItem, CategoryBudget, init_db
 from process_transactions import process_files, save_to_db
 from plaid_integration import create_link_token, exchange_public_token, fetch_transactions
 from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_worth_trend
@@ -22,6 +23,8 @@ st.set_page_config(page_title="Family Finance Tracker", layout="wide", page_icon
 MODEL_PATH = Path("personal_finance_tracker/models/transaction_classifier.pkl")
 
 # --- Database Session ---
+init_db()
+
 if "db" not in st.session_state:
     st.session_state.db = SessionLocal()
 
@@ -453,14 +456,107 @@ def load_data():
         "Date": t.date,
         "Description": t.description,
         "Amount": t.amount,
-        "Category": t.category,
+        "Category": t.category or "Uncategorized",
         "IsShared": t.is_shared,
         "ID": t.id
     } for t in transactions]
     
     df = pd.DataFrame(data)
     df["Date"] = pd.to_datetime(df["Date"])
+    df["Category"] = df["Category"].fillna("Uncategorized").replace("", "Uncategorized")
     return df
+
+
+def upsert_plaid_item(item_id: str, access_token: str, institution_name: str = "Unknown Institution") -> PlaidItem:
+    db = get_db()
+    item = db.query(PlaidItem).filter(PlaidItem.item_id == item_id).first()
+    if not item:
+        item = PlaidItem(item_id=item_id, access_token=access_token, institution_name=institution_name)
+        db.add(item)
+    else:
+        item.access_token = access_token
+        if institution_name:
+            item.institution_name = institution_name
+    db.commit()
+    return item
+
+
+def sync_plaid_transactions(item: PlaidItem, share_with_family: bool = True):
+    db = get_db()
+    total_new = 0
+    cursor = item.cursor
+    latest_cursor = cursor
+    has_more = True
+
+    while has_more:
+        resp = fetch_transactions(item.access_token, cursor=cursor)
+        resp_data = resp.to_dict() if hasattr(resp, "to_dict") else resp
+
+        added = resp_data.get("added", [])
+        has_more = resp_data.get("has_more", False)
+        latest_cursor = resp_data.get("next_cursor", latest_cursor)
+        cursor = latest_cursor
+
+        for t in added:
+            plaid_id = t.get("transaction_id")
+            if plaid_id and db.query(Transaction).filter(Transaction.plaid_transaction_id == plaid_id).first():
+                continue
+
+            category_list = t.get("category") or []
+            pf_category = None
+            if t.get("personal_finance_category"):
+                pf_category = t["personal_finance_category"].get("primary")
+            category_value = pf_category or (category_list[0] if category_list else "Uncategorized")
+
+            # Treat non-income as negative for downstream expense calculations
+            raw_amount = t.get("amount", 0)
+            is_income = (pf_category or "").lower() == "income"
+            signed_amount = raw_amount if is_income else -abs(raw_amount)
+
+            new_txn = Transaction(
+                date=pd.to_datetime(t.get("date")).date(),
+                description=t.get("name", "Plaid Transaction"),
+                amount=signed_amount,
+                category=category_value or "Uncategorized",
+                source="plaid",
+                plaid_transaction_id=plaid_id,
+                is_shared=share_with_family,
+            )
+            db.add(new_txn)
+            total_new += 1
+
+        db.commit()
+
+    item.cursor = latest_cursor
+    item.last_synced_at = datetime.utcnow()
+    db.commit()
+    return total_new
+
+
+def compute_budget_status(df_prep: pd.DataFrame, budgets: list[CategoryBudget]):
+    if df_prep.empty or not budgets:
+        return []
+
+    current_month = str(pd.Timestamp.today().strftime("%Y-%m"))
+    month_df = df_prep[df_prep["Month"] == current_month]
+    expenses = month_df[month_df["Amount"] < 0].copy()
+    spent_by_cat = expenses.groupby("Category")["Amount"].sum().abs()
+
+    status = []
+    for budget in budgets:
+        limit = float(budget.monthly_limit or 0)
+        spent = float(spent_by_cat.get(budget.category, 0))
+        remaining = limit - spent
+        pct = spent / limit if limit > 0 else 0
+        status.append({
+            "category": budget.category,
+            "limit": limit,
+            "spent": spent,
+            "remaining": remaining,
+            "pct": pct,
+            "is_over": remaining < 0,
+        })
+    return status
 
 # --- Main App ---
 current_role = st.session_state.get("role") or "family"
@@ -487,7 +583,7 @@ with st.sidebar:
 
     st.divider()
     st.header("Data Management")
-    
+
     if is_admin():
         # File Upload
         uploaded_files = st.file_uploader(
@@ -496,7 +592,7 @@ with st.sidebar:
             accept_multiple_files=True,
             help="Upload transaction CSV files from your bank"
         )
-        
+
         if uploaded_files:
             saved_paths = []
             for uploaded_file in uploaded_files:
@@ -505,7 +601,7 @@ with st.sidebar:
                 with open(path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 saved_paths.append(path)
-            
+
             # Process
             with st.spinner("Processing..."):
                 try:
@@ -523,39 +619,57 @@ with st.sidebar:
                     # Cleanup
                     for p in saved_paths:
                         p.unlink()
-        
+
         st.divider()
-        
-        # Plaid Connection
-        st.subheader("🏦 Connect Bank (Plaid)")
-        if st.button("Connect Bank Account", use_container_width=True):
+        st.subheader("🏦 Bank Sync (Plaid)")
+        st.caption("Connect once, then pull fresh transactions with a single click. Imports can be shared with family automatically.")
+
+        share_default = st.checkbox("Share Plaid imports with family", value=True, key="plaid_share_default")
+
+        plaid_items = db_sidebar.query(PlaidItem).all()
+        if plaid_items:
+            for item in plaid_items:
+                last_sync = item.last_synced_at.strftime("%b %d, %Y %I:%M %p") if item.last_synced_at else "Never"
+                col_a, col_b = st.columns([2, 1])
+                col_a.markdown(f"**{item.institution_name}**  \
+Last sync: {last_sync}")
+                if col_b.button("Sync now", key=f"sync_{item.id}"):
+                    with st.spinner("Syncing transactions..."):
+                        try:
+                            new_count = sync_plaid_transactions(item, share_with_family=share_default)
+                            st.success(f"Pulled {new_count} new transactions.")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Plaid sync failed: {e}")
+        else:
+            st.caption("No banks linked yet.")
+
+        st.markdown("---")
+        st.markdown("**Link a new bank**")
+
+        if st.button("🔗 Start Plaid Link (Sandbox)"):
             try:
-                link_token = create_link_token()
-                if link_token:
-                    st.info("Open plaid_test.html in your browser to complete connection")
-                    st.code(f"Link Token: {link_token}", language="text")
-                else:
-                    st.error("Failed to create link token")
+                link_token = create_link_token(str(st.session_state.get("user_id", "admin")))
+                st.info(f"Link Token Created: `{link_token}`")
+                st.markdown("""
+                1. Open `plaid_test.html` (in this repo) and paste the token above.
+                2. Complete the flow to obtain a **Public Token**.
+                3. Enter it below to save the connection.
+                """)
             except Exception as e:
-                st.error(f"Error: {e}")
-        
-        public_token = st.text_input("Paste Public Token from Plaid Link", key="plaid_public_token")
-        if st.button("Exchange Token", use_container_width=True) and public_token:
+                st.error(f"Plaid Error: {e}")
+
+        institution_label = st.text_input("Institution label", value="Plaid Sandbox")
+        public_token = st.text_input("Public Token (from Plaid Link)", key="plaid_public_token")
+        if st.button("Exchange & Save Connection", use_container_width=True) and public_token:
             try:
-                access_token = exchange_public_token(public_token)
-                if access_token:
-                    st.success("Connected! Fetching transactions...")
-                    txns = fetch_transactions(access_token)
-                    if txns:
-                        st.success(f"Fetched {len(txns)} transactions")
-                        # Save to database logic here
-                    else:
-                        st.warning("No transactions found")
-                else:
-                    st.error("Failed to exchange token")
+                access_token, item_id = exchange_public_token(public_token)
+                plaid_item = upsert_plaid_item(item_id, access_token, institution_label)
+                st.success(f"Saved connection for {plaid_item.institution_name}. You can sync immediately.")
             except Exception as e:
-                st.error(f"Error: {e}")
-    
+                st.error(f"Exchange Error: {e}")
+
     st.divider()
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state["authenticated"] = False
@@ -570,6 +684,11 @@ if not df.empty:
     df_prep = _prep(df)
 else:
     df_prep = pd.DataFrame()
+
+db_session = get_db()
+budgets_all = db_session.query(CategoryBudget).all()
+visible_budgets = [b for b in budgets_all if is_admin() or b.is_shared]
+budget_status = compute_budget_status(df_prep, visible_budgets)
 
 # Tabs (removed Connect tab - moved to sidebar)
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "💳 Transactions", "💸 Loans", "📅 Fixed Expenses", "🧠 Insights"])
@@ -633,6 +752,42 @@ with tab4:
     else:
         st.info("No fixed expenses added yet.")
 
+    st.subheader("🎯 Category Budgets")
+    existing_categories = sorted(df["Category"].unique().tolist()) if not df.empty else []
+
+    if is_admin():
+        with st.expander("➕ Add or Update Budget"):
+            with st.form("add_budget"):
+                choice = st.selectbox("Use an existing category", ["Type a new one"] + existing_categories)
+                custom = st.text_input("Or type a new category")
+                category_val = custom.strip() or (choice if choice != "Type a new one" else "")
+                limit = st.number_input("Monthly limit ($)", min_value=0.0, step=50.0)
+                share_budget = st.checkbox("Share this budget with family", value=True)
+
+                if st.form_submit_button("Save Budget"):
+                    if not category_val:
+                        st.error("Please choose or enter a category.")
+                    else:
+                        existing_budget = db.query(CategoryBudget).filter(CategoryBudget.category == category_val).first()
+                        if existing_budget:
+                            existing_budget.monthly_limit = limit
+                            existing_budget.is_shared = share_budget
+                        else:
+                            db.add(CategoryBudget(category=category_val, monthly_limit=limit, is_shared=share_budget))
+                        db.commit()
+                        st.success(f"Budget saved for {category_val}.")
+                        st.rerun()
+
+    if visible_budgets:
+        budget_data = [{
+            "Category": b.category,
+            "Monthly Limit": b.monthly_limit,
+            "Shared": b.is_shared
+        } for b in visible_budgets]
+        st.dataframe(pd.DataFrame(budget_data), use_container_width=True)
+    else:
+        st.info("No budgets configured yet.")
+
 
 with tab1:
     if df_prep.empty:
@@ -653,8 +808,22 @@ with tab1:
         st.subheader("📈 Financial Health")
         st.plotly_chart(net_worth_trend(df_prep), use_container_width=True)
 
+        if budget_status:
+            st.subheader("🎯 Budgets (This Month)")
+            for b in budget_status:
+                remaining = b["remaining"]
+                status_label = "On track" if remaining >= 0 else "Over budget"
+                st.markdown(f"**{b['category']}** — ${b['spent']:,.0f} / ${b['limit']:,.0f} ({status_label})")
+                st.progress(min(1.0, b["pct"]), text=f"Spent ${b['spent']:,.0f} • Remaining ${max(0, remaining):,.0f}")
+                if b["is_over"]:
+                    st.error(f"Over by ${abs(remaining):,.0f}. Consider pausing discretionary spend here.")
+
 with tab2:
     st.subheader("Transaction Log")
+    if budget_status:
+        over_budget = [b for b in budget_status if b["is_over"]]
+        for b in over_budget:
+            st.warning(f"{b['category']} is over budget by ${abs(b['remaining']):,.0f}. Recent transactions in this category deserve a closer look.")
     if df.empty:
         st.info("No transactions.")
     else:
@@ -742,35 +911,54 @@ with tab3:
         
         # Detailed Table
         l_data = [{
-            "Lender": l.lender, "Balance": l.balance, "Rate": f"{l.interest_rate}%", 
+            "Lender": l.lender, "Balance": l.balance, "Rate": f"{l.interest_rate}%",
             "Min Payment": l.min_payment, "Shared": l.is_shared
         } for l in visible_loans]
         st.dataframe(pd.DataFrame(l_data), use_container_width=True)
-        
+
         # Amortization Simulator (Simple)
         st.subheader("📉 Payoff Simulator")
         selected_loan_name = st.selectbox("Select Loan to Simulate", [l.lender for l in visible_loans])
         selected_loan = next(l for l in visible_loans if l.lender == selected_loan_name)
-        
-        extra_pmt = st.slider("Extra Monthly Payment ($)", 0, 2000, 100)
-        
-        # Simulate
-        # (Using simplified logic here instead of calling loans.py for speed)
-        balance = selected_loan.balance
-        rate_monthly = (selected_loan.interest_rate / 100) / 12
-        pmt = selected_loan.min_payment + extra_pmt
-        
-        months = 0
-        balances = [balance]
-        while balance > 0 and months < 360:
-            interest = balance * rate_monthly
-            principal_paid = pmt - interest
-            balance -= principal_paid
-            balances.append(max(0, balance))
-            months += 1
-            
-        st.line_chart(balances)
-        st.caption(f"With ${extra_pmt} extra, you'll be debt-free in **{months // 12} years and {months % 12} months**!")
+
+        extra_pmt = st.slider("Extra Monthly Payment ($)", 0, 2000, 0, help="Add a top-up to your required payment to see the impact.")
+
+        base_schedule = simulate_payoff(selected_loan.balance, selected_loan.interest_rate, selected_loan.min_payment, extra_payment=0)
+        boosted_schedule = simulate_payoff(selected_loan.balance, selected_loan.interest_rate, selected_loan.min_payment, extra_payment=extra_pmt)
+
+        if base_schedule.empty:
+            st.error("The current payment is too low to cover interest. Increase the minimum payment to see a schedule.")
+        else:
+            months_base = len(base_schedule)
+            months_boost = len(boosted_schedule) if not boosted_schedule.empty else months_base
+            interest_base = base_schedule["Interest"].sum()
+            interest_boost = boosted_schedule["Interest"].sum() if not boosted_schedule.empty else interest_base
+
+            years_base = months_base // 12
+            years_boost = months_boost // 12
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Payoff (minimums)", f"{years_base}y {months_base % 12}m")
+            if extra_pmt > 0 and not boosted_schedule.empty:
+                c2.metric("Payoff with extra", f"{years_boost}y {months_boost % 12}m", delta=f"-{months_base - months_boost} months")
+                c3.metric("Interest saved", f"${interest_base - interest_boost:,.0f}")
+            else:
+                c2.metric("Extra payment", "$0", help="Move the slider to compare scenarios.")
+                c3.metric("Interest (minimums)", f"${interest_base:,.0f}")
+
+            # Chart both curves
+            chart_df = pd.DataFrame({
+                "Month": base_schedule["Month"],
+                "Balance (Minimum)": base_schedule["Balance"]
+            })
+            if not boosted_schedule.empty:
+                chart_df["Balance (With Extra)"] = boosted_schedule["Balance"]
+            st.line_chart(chart_df.set_index("Month"))
+            st.caption("The chart compares how quickly the balance falls with and without the extra payment.")
+
+            with st.expander("See amortization table"):
+                preview_rows = boosted_schedule if not boosted_schedule.empty else base_schedule
+                st.dataframe(preview_rows.head(24), use_container_width=True)
 
     else:
         st.info("No loans found.")
@@ -796,68 +984,3 @@ with tab5:
         st.plotly_chart(predict_spending(df_prep), use_container_width=True)
     else:
         st.info("Need transaction data to generate insights.")
-
-with tab5:
-    st.header("Connect Bank (Plaid)")
-    if is_admin():
-        st.write("Link your bank account to fetch transactions automatically.")
-        
-        # In a real app, we'd use a frontend component to handle the Link flow.
-        # Here we simulate the exchange or allow manual public token entry (dev mode).
-        
-        if st.button("🔗 Start Plaid Link (Sandbox)"):
-            try:
-                link_token = create_link_token(str(st.session_state["user_id"]))
-                st.info(f"Link Token Created: `{link_token}`")
-                st.markdown("""
-                **Instructions:**
-                1. Use a Plaid Link frontend (e.g., React app or HTML test file) with this token.
-                2. Complete the flow to get a **Public Token**.
-                3. Enter the Public Token below.
-                """)
-            except Exception as e:
-                st.error(f"Plaid Error: {e}")
-                
-        public_token = st.text_input("Enter Public Token (from Link flow)")
-        if st.button("Exchange & Sync"):
-            if public_token:
-                try:
-                    access_token, item_id = exchange_public_token(public_token)
-                    st.success(f"Connected! Item ID: {item_id}")
-                    
-                    # Fetch initial transactions
-                    resp = fetch_transactions(access_token)
-                    transactions = resp['added']
-                    
-                    if transactions:
-                        db = get_db()
-                        count = 0
-                        for t in transactions:
-                            # Check for duplicates
-                            exists = db.query(Transaction).filter(Transaction.plaid_transaction_id == t['transaction_id']).first()
-                            if not exists:
-                                # Simple auto-categorization fallback if model not used here yet
-                                # In future, we can run the classifier on t['name']
-                                
-                                new_txn = Transaction(
-                                    date=pd.to_datetime(t['date']).date(),
-                                    description=t['name'],
-                                    amount=t['amount'],
-                                    category=t['category'][0] if t['category'] else "Uncategorized",
-                                    source="plaid",
-                                    plaid_transaction_id=t['transaction_id'],
-                                    is_shared=False
-                                )
-                                db.add(new_txn)
-                                count += 1
-                        db.commit()
-                        st.success(f"Imported {count} new transactions from Plaid!")
-                        time.sleep(2)
-                        st.rerun()
-                    else:
-                        st.info("No new transactions found.")
-                        
-                except Exception as e:
-                    st.error(f"Exchange Error: {e}")
-    else:
-        st.error("Admin only.")

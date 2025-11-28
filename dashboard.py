@@ -27,6 +27,8 @@ def _prep(df):
     
     if "Category" not in df.columns:
         df["Category"] = "Uncategorized"
+    else:
+        df["Category"] = df["Category"].fillna("Uncategorized").replace("", "Uncategorized")
         
     return df
 
@@ -91,6 +93,7 @@ def cat_spend(df):
     """
     # Filter out income and transfers
     spend_df = df[(df['Amount'] < 0) & (~df['Category'].isin(['Transfer', 'Payment', 'Income']))].copy()
+    spend_df['Category'] = spend_df['Category'].fillna('Uncategorized').replace('', 'Uncategorized')
     spend_df['Amount'] = abs(spend_df['Amount'])
     
     by_cat = spend_df.groupby('Category')['Amount'].sum().reset_index()
