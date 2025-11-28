@@ -18,17 +18,11 @@ from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_wo
 from loans import _prep_loans, simulate_payoff
 from insights import (
     assistant_response,
-    auto_categorize_transactions,
-    build_personalized_budget,
     compute_highlights,
     detect_anomalies,
-    forecast_cash_flow,
-    generate_predictive_nudges,
     generate_actionable_tips,
-    goal_savings_plan,
     predict_spending,
     summarize_budget_watch,
-    track_budget_progress,
 )
 
 # --- Configuration ---
@@ -984,7 +978,7 @@ with tab5:
     if df_prep.empty:
         st.info("Need transaction data to generate insights.")
     else:
-        st.caption("AI categorization, proactive budgets, anomaly detection, cashflow forecasts, and a goal-aware assistant.")
+        st.caption("Curated highlights, budget watch-outs, and an on-page assistant to make this page actually smart.")
 
         col_range, _ = st.columns([3, 1])
         with col_range:
@@ -1012,24 +1006,6 @@ with tab5:
             st.info("No data in the selected window. Try expanding the timeframe.")
             st.stop()
 
-
-        # Automated Categorization
-        st.subheader("🤖 Automated Categorization")
-        feedback_map = st.session_state.get("category_feedback", {})
-        suggestions = auto_categorize_transactions(filtered_df, MODEL_PATH, feedback_map)
-        if not suggestions.empty:
-            st.dataframe(suggestions, use_container_width=True)
-            with st.form("categorization_feedback"):
-                choice = st.selectbox("Pick a transaction to correct", suggestions["Description"].unique())
-                corrected = st.text_input("Correct category")
-                if st.form_submit_button("Save correction") and corrected:
-                    feedback_map[choice] = corrected
-                    st.session_state["category_feedback"] = feedback_map
-                    st.success("Saved. Future suggestions will learn this correction.")
-                    st.rerun()
-        else:
-            st.success("All transactions are categorized with confidence.")
-
         highlights = compute_highlights(filtered_df)
         st.subheader("Highlights")
         h1, h2, h3, h4 = st.columns(4)
@@ -1053,60 +1029,22 @@ with tab5:
         else:
             st.success("✅ Your finances look stable! No alerts this month.")
 
-        # Budgeting and goals
-        st.subheader("📊 Personalized Budget & Goal Tracking")
-        cashflow_projection = []
-        fixed_expenses_all = db_session.query(FixedExpense).all()
-        fixed_visible = [e for e in fixed_expenses_all if is_admin() or e.is_shared]
-        cashflow_projection = forecast_cash_flow(filtered_df, fixed_visible)
-
-        goal_commitments = []
-        goal_plan = None
-        with st.expander("Plan a savings goal"):
-            with st.form("goal_planner"):
-                goal_name = st.text_input("Goal name", value="Down payment")
-                goal_amount = st.number_input("Target amount", min_value=0.0, step=1000.0, value=10000.0)
-                target_date = st.date_input("Target date")
-                saved_so_far = st.number_input("Already saved", min_value=0.0, step=100.0, value=0.0)
-                plan_submitted = st.form_submit_button("Create plan")
-
-            if plan_submitted:
-                target_dt = datetime.combine(target_date, datetime.min.time())
-                goal_plan = goal_savings_plan(goal_name, goal_amount, target_dt, saved_so_far, cashflow_projection)
-                goal_commitments = [goal_plan]
-                st.success(
-                    f"Save about ${goal_plan['required_monthly']:,.0f}/mo (safe ${goal_plan['safe_monthly']:,.0f}) to hit {goal_plan['goal']} in {goal_plan['months_remaining']} months."
-                )
-
-        suggested_budget = build_personalized_budget(filtered_df, savings_rate=0.18, goal_commitments=goal_commitments)
-        budget_progress = track_budget_progress(filtered_df, suggested_budget["budgets"])
-        if suggested_budget["budgets"]:
-            st.caption(f"Suggested monthly savings target: ${suggested_budget['savings_target']:,.0f} based on ${suggested_budget['income_avg']:,.0f} average income.")
-            st.dataframe(pd.DataFrame(suggested_budget["budgets"]).rename(columns={"avg_spend": "Avg Spend", "suggested_limit": "Suggested Limit"}), use_container_width=True)
-        if budget_progress:
-            st.markdown("**Live budget tracking**")
-            progress_df = pd.DataFrame(budget_progress)
-            st.dataframe(progress_df[["category", "limit", "spent", "remaining", "pct", "is_over"]], use_container_width=True)
-            budget_alerts = summarize_budget_watch(budget_progress)
-            for alert in budget_alerts:
-                st.warning(alert)
-
         st.subheader("Anomalies & Unusual Activity")
-        anomalies = detect_anomalies(filtered_df, budget_progress)
-        if anomalies["spikes"] is not None and not anomalies["spikes"].empty:
+        anomalies = detect_anomalies(filtered_df)
+        if not anomalies.empty:
             show_cols = ["Date", "Description", "Amount", "Category"]
-            st.dataframe(anomalies["spikes"][show_cols].assign(Amount=anomalies["spikes"]["Amount"].abs()), use_container_width=True)
+            st.dataframe(anomalies[show_cols].assign(Amount=anomalies["Amount"].abs()), use_container_width=True)
             st.caption("Transactions more than 2 standard deviations from your normal spend.")
         else:
             st.info("No suspicious spikes detected in the selected window.")
 
-        if anomalies["duplicates"] is not None and not anomalies["duplicates"].empty:
-            st.warning("Possible duplicate charges detected this week:")
-            st.dataframe(anomalies["duplicates"][show_cols].assign(Amount=anomalies["duplicates"]["Amount"].abs()), use_container_width=True)
-
-        if anomalies["overspend_risk"]:
-            for msg in anomalies["overspend_risk"]:
-                st.warning(msg)
+        st.subheader("Budget Watch")
+        budget_alerts = summarize_budget_watch(budget_status)
+        if budget_alerts:
+            for alert in budget_alerts:
+                st.warning(alert)
+        else:
+            st.success("No budgets are at risk right now.")
 
         st.subheader("🔮 Spending Forecast")
         forecast = predict_spending(filtered_df)
@@ -1115,32 +1053,17 @@ with tab5:
         if forecast.get("forecast_month"):
             st.caption(f"Next update based on data through {forecast['forecast_month']} (refreshed {forecast['updated_at']:%Y-%m-%d %H:%M UTC}).")
 
-        st.subheader("💵 Cash Flow Outlook")
-        if cashflow_projection:
-            cf_df = pd.DataFrame(cashflow_projection)
-            cf_df["horizon"] = cf_df["horizon_days"].astype(str) + " days"
-            st.dataframe(cf_df[["horizon", "projected_net", "recurring", "ending_balance"]], use_container_width=True)
-            st.caption("Blend of recent daily net flows and scheduled recurring expenses across 30/60/90 days.")
-        else:
-            st.info("Add more transaction history to project cash flow.")
-
-        nudges = generate_predictive_nudges(filtered_df, anomalies, budget_progress, cashflow_projection)
-        if nudges:
-            st.subheader("🎯 Predictive Nudges")
-            for nudge in nudges:
-                st.info(nudge)
-
         st.subheader("💬 AI Insights Assistant")
         with st.form("insights_assistant"):
             prompt = st.text_area(
                 "Ask a question about your money",
-                placeholder="e.g., How much can I safely save this week?",
-                help="Uses on-page data only; no external calls.",
+                placeholder="e.g., Where can I trim spend this month?",
+                help="Uses on-page data only; no external calls."
             )
             submitted = st.form_submit_button("Ask the Assistant")
 
         if submitted:
-            response = assistant_response(filtered_df, prompt, budget_progress, forecast, anomalies, cashflow_projection, goal_plan)
+            response = assistant_response(filtered_df, prompt, budget_status, forecast, anomalies)
             formatted_response = response.replace("\n", "<br>")
             st.markdown(
                 f"""
@@ -1151,4 +1074,4 @@ with tab5:
                 unsafe_allow_html=True,
             )
         else:
-            st.caption("Try asking: • What category is pacing over budget? • How much can I save without causing a shortfall? • Any duplicate charges to dispute?")
+            st.caption("Try asking: • What changed most this month? • How do I avoid overspending this week? • Where is my biggest category drift?")

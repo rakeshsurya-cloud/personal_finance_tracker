@@ -123,11 +123,6 @@ The script serialises the vectorizer and model using pickle.
   anomaly detection, cash-flow projections, predictive nudges, and an
   on-page assistant). See `docs/SMART_INSIGHTS.md` for how these
   features are computed.
-* **MCP + self-hosted agent** – If you want a privacy-first AI agent,
-  `docs/MCP_AGENT.md` outlines a three-layer Model Context Protocol
-  setup (data, MCP tool server, and local LLM/chat UI) that can run
-  alongside this app. The Streamlit UI itself does not ship an MCP
-  server; follow the guide to deploy those layers separately.
 
 ## Privacy Considerations
 
