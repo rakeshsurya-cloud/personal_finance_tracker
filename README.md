@@ -118,6 +118,11 @@ The script serialises the vectorizer and model using pickle.
   dashboard stays up to date.  Because the script reads all files
   every time, it will ignore duplicates and aggregate new data
   automatically.
+* **Smart Insights** – The Streamlit app now layers AI-like behaviors
+  on top of your processed data (auto-categorization, budgets,
+  anomaly detection, cash-flow projections, predictive nudges, and an
+  on-page assistant). See `docs/SMART_INSIGHTS.md` for how these
+  features are computed.
 
 ## Privacy Considerations
 
