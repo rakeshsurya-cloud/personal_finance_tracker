@@ -293,7 +293,8 @@ def check_login():
     with pass_col:
         password = st.text_input(
             "Password",
-            type="text" if st.session_state.get("show_password") else "password",
+            # Streamlit accepts only "default" or "password" types.
+            type="default" if st.session_state.get("show_password") else "password",
             placeholder="Enter your password",
             key="login_pass",
         )
