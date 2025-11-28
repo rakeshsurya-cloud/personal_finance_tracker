@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from dotenv import load_dotenv
 
@@ -45,6 +45,17 @@ class Transaction(Base):
     source = Column(String, default="manual")     # 'manual', 'plaid', 'csv_upload'
     plaid_transaction_id = Column(String, unique=True, nullable=True)
 
+
+class PlaidItem(Base):
+    __tablename__ = "plaid_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(String, unique=True, index=True)
+    access_token = Column(String)
+    institution_name = Column(String, default="Unknown Institution")
+    cursor = Column(String, nullable=True)
+    last_synced_at = Column(DateTime, nullable=True)
+
 class Loan(Base):
     __tablename__ = "loans"
 
@@ -70,6 +81,15 @@ class FixedExpense(Base):
     category = Column(String)
     priority = Column(String) # 'Critical', 'High', 'Medium', 'Low'
     is_shared = Column(Boolean, default=False)
+
+
+class CategoryBudget(Base):
+    __tablename__ = "category_budgets"
+
+    id = Column(Integer, primary_key=True, index=True)
+    category = Column(String, unique=True)
+    monthly_limit = Column(Float)
+    is_shared = Column(Boolean, default=True)
 
 # --- Init DB ---
 def init_db():
