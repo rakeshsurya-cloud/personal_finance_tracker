@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plaid Link Helper</title>
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 40px;
+            max-width: 600px;
+            margin: 0 auto;
+            background: #f4f4f9;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        button {
+            background: #000;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            font-size: 16px;
+        }
+
+        button:hover {
+            background: #333;
+        }
+
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e8f5e9;
+            border: 1px solid #c8e6c9;
+            border-radius: 4px;
+            display: none;
+            word-break: break-all;
+        }
+
+        label {
+            font-weight: bold;
+            display: block;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h2>🔗 Plaid Link Helper</h2>
+        <p>Use this tool to connect your bank and generate a <b>Public Token</b> for the app.</p>
+
+        <label>link-sandbox-e4ca8e73-c22d-4a27-9028-894455e422d4:</label>
+        <input type="text" id="link_token" placeholder="link-sandbox-...">
+
+        <button id="linkButton">Open Plaid Link</button>
+
+        <div id="result">
+            <label>✅ Success! Copy this Public Token:</label>
+            <code id="public_token"></code>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('linkButton').onclick = function () {
+            const token = document.getElementById('link_token').value;
+            if (!token) { alert("Please paste a Link Token first!"); return; }
+
+            const handler = Plaid.create({
+                token: token,
+                onSuccess: function (public_token, metadata) {
+                    document.getElementById('result').style.display = 'block';
+                    document.getElementById('public_token').innerText = public_token;
+                    console.log('Public Token:', public_token);
+                },
+                onLoad: function () { },
+                onExit: function (err, metadata) {
+                    if (err != null) {
+                        alert("Error: " + err.error_message);
+                    }
+                },
+                onEvent: function (eventName, metadata) { },
+            });
+            handler.open();
+        };
+    </script>
+</body>
+
+</html>

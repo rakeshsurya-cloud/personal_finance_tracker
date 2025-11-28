@@ -1,159 +1,113 @@
 # dashboard.py — richer dashboard with date slider + search box (client-side)
 
-from __future__ import annotations
-import pandas as pd
-import plotly.graph_objects as go
+import streamlit as st
 import plotly.express as px
-from pathlib import Path
+import plotly.graph_objects as go
+import pandas as pd
+from datetime import date
 
-def _prep(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["Date"] = pd.to_datetime(out["Date"])
-    out["Amount"] = pd.to_numeric(out["Amount"])
-    out["Merchant"] = out["Description"].astype(str).str.strip()
-    out["Month"] = out["Date"].dt.to_period("M").dt.to_timestamp()
-    out["IsExpense"] = out["Amount"] < 0
-    out["AbsExpense"] = out["Amount"].where(out["Amount"] < 0, 0).abs()
-    out["Income"] = out["Amount"].where(out["Amount"] > 0, 0)
-    if "Category" not in out.columns:
-        out["Category"] = "Uncategorized"
-    return out
-
-def _kpis(df: pd.DataFrame) -> go.Figure:
-    ti = float(df["Income"].sum())
-    te = float(df["AbsExpense"].sum())
-    net = float(df["Amount"].sum())
-    n  = int(len(df))
-    fig = go.Figure()
-    fig.add_trace(go.Indicator(mode="number", value=ti, number={"prefix":"$","valueformat":",.0f"},
-                               title={"text":"Total Income"}, domain={"row":0,"column":0}))
-    fig.add_trace(go.Indicator(mode="number", value=te, number={"prefix":"$","valueformat":",.0f"},
-                               title={"text":"Total Expenses"}, domain={"row":0,"column":1}))
-    fig.add_trace(go.Indicator(mode="number", value=net, number={"prefix":"$","valueformat":",.0f"},
-                               title={"text":"Net Cash Flow"}, domain={"row":0,"column":2}))
-    fig.add_trace(go.Indicator(mode="number", value=n, title={"text":"Transactions"},
-                               domain={"row":0,"column":3}))
-    fig.update_layout(grid={"rows":1,"columns":4}, height=180, margin=dict(l=20,r=20,t=20,b=10))
-    return fig
-
-def cat_spend(df: pd.DataFrame) -> go.Figure:
-    by_cat = (df.loc[df["IsExpense"]]
-                .groupby("Category", as_index=False)["AbsExpense"].sum()
-                .sort_values("AbsExpense", ascending=False))
-    fig = px.bar(by_cat, x="Category", y="AbsExpense", title="Spending by Category (Expenses)")
-    fig.update_layout(yaxis_title="Total Spent", xaxis_title="Category", height=380,
-                      margin=dict(l=40,r=20,t=60,b=40))
-    # Legend note: click category bars in legend to isolate/hide series
-    return fig
-
-def income_vs_expense_monthly(df: pd.DataFrame) -> go.Figure:
-    by_m = df.groupby("Month", as_index=False).agg(Income=("Income","sum"), Expenses=("AbsExpense","sum"))
-    fig = go.Figure()
-    fig.add_bar(x=by_m["Month"], y=by_m["Income"], name="Income")
-    fig.add_bar(x=by_m["Month"], y=by_m["Expenses"], name="Expenses")
-    fig.update_layout(barmode="group", title="Income vs. Expenses by Month",
-                      xaxis_title="Month", yaxis_title="Amount", height=380,
-                      margin=dict(l=40,r=20,t=60,b=40))
-    # Date range slider
-    fig.update_xaxes(rangeslider=dict(visible=True))
-    return fig
-
-def net_cashflow_month(df: pd.DataFrame) -> go.Figure:
-    by_m = df.groupby("Month", as_index=False)["Amount"].sum()
-    fig = px.line(by_m, x="Month", y="Amount", title="Net Cash Flow by Month")
-    fig.update_layout(yaxis_title="Net", xaxis_title="Month", height=320, margin=dict(l=40,r=20,t=60,b=40))
-    fig.update_xaxes(rangeslider=dict(visible=True))
-    return fig
-
-def top_merchants(df: pd.DataFrame, days:int=90, top_k:int=10) -> go.Figure:
-    cutoff = df["Date"].max() - pd.Timedelta(days=days) if not df.empty else pd.Timestamp.utcnow() - pd.Timedelta(days=days)
-    recent = df[(df["Date"] >= cutoff) & (df["IsExpense"])]
-    by_m = (recent.groupby("Merchant", as_index=False)["AbsExpense"].sum()
-                 .sort_values("AbsExpense", ascending=False).head(top_k))
-    fig = px.bar(by_m, x="Merchant", y="AbsExpense", title=f"Top Merchants (last {days} days)")
-    fig.update_layout(yaxis_title="Total Spent", xaxis_title="", height=380, margin=dict(l=40,r=20,t=60,b=120))
-    fig.update_xaxes(tickangle=30)
-    return fig
-
-def recurring_vs_onetime(df: pd.DataFrame) -> go.Figure:
-    counts = (df[df["IsExpense"]]
-              .groupby("Merchant")
-              .agg(n_months=("Month","nunique"), total=("AbsExpense","sum"))
-              .reset_index())
-    counts["Type"] = counts["n_months"].apply(lambda n: "Recurring" if n >= 3 else "One-time")
-    by_type = counts.groupby("Type", as_index=False)["total"].sum()
-    fig = px.pie(by_type, names="Type", values="total", title="Recurring vs. One-time (by spend)")
-    fig.update_layout(height=340, margin=dict(l=20,r=20,t=60,b=20))
-    return fig
-
-def recent_table_html(df: pd.DataFrame, n:int=100) -> str:
-    # Plain HTML table for client-side search
-    tbl = df.sort_values("Date", ascending=False).head(n)[["Date","Description","Category","Amount"]].copy()
-    # format date/amount
-    tbl["Date"] = pd.to_datetime(tbl["Date"]).dt.date.astype(str)
-    tbl["Amount"] = tbl["Amount"].map(lambda x: f"${x:,.2f}")
-    head = "<table id='recentTable' style='width:100%;border-collapse:collapse;font-family:system-ui'>"
-    thead = "<thead><tr>" + "".join(f"<th style='text-align:left;border-bottom:1px solid #ddd;padding:6px'>{c}</th>" for c in tbl.columns) + "</tr></thead>"
-    rows = []
-    for _, r in tbl.iterrows():
-        tds = "".join(f"<td style='padding:6px;border-bottom:1px solid #f0f0f0'>{r[c]}</td>" for c in tbl.columns)
-        rows.append(f"<tr>{tds}</tr>")
-    tbody = "<tbody>" + "".join(rows) + "</tbody>"
-    tail = "</table>"
-    # Simple search box JS
-    search = """
-    <input id="searchBox" placeholder="Search Description..." style="margin:8px 0;padding:6px;width:50%;font-family:system-ui"/>
-    <script>
-      const box = document.getElementById('searchBox');
-      const tbl = document.getElementById('recentTable').getElementsByTagName('tbody')[0];
-      box.addEventListener('input', () => {
-        const q = box.value.toLowerCase();
-        for (const row of tbl.rows) {
-          const desc = row.cells[1].innerText.toLowerCase();
-          row.style.display = desc.includes(q) ? '' : 'none';
-        }
-      });
-    </script>
+def _prep(df):
     """
-    return search + head + thead + tbody + tail
+    Prepares the dataframe for dashboarding.
+    """
+    if df.empty:
+        return df
+    
+    df = df.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df['Month'] = df['Date'].dt.to_period('M').astype(str)
+    
+    # Ensure Amount is numeric
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+    
+    # Helper columns
+    df['IsExpense'] = df['Amount'] < 0
+    df['AbsExpense'] = df['Amount'].where(df['Amount'] < 0, 0).abs()
+    df['Income'] = df['Amount'].where(df['Amount'] > 0, 0)
+    
+    if "Category" not in df.columns:
+        df["Category"] = "Uncategorized"
+        
+    return df
 
-def build_dashboard(categorized_csv: str | Path, out_html: str | Path) -> None:
-    df = pd.read_csv(categorized_csv)
-    df = _prep(df)
+def _kpis(df, fixed_expenses_total=0.0):
+    """
+    Displays the top-level KPIs with 'Wow' factor.
+    """
+    # Filter for current month
+    current_month = str(date.today().strftime("%Y-%m"))
+    df_curr = df[df['Month'] == current_month]
+    
+    # 1. Total Income (Positive transactions, excluding transfers)
+    income = df_curr[df_curr['Amount'] > 0]['Amount'].sum()
+    
+    # 2. Total Spend (Negative transactions, excluding transfers)
+    spend = abs(df_curr[df_curr['Amount'] < 0]['Amount'].sum())
+    
+    # 3. Net Cashflow
+    net = income - spend
+    
+    # 4. Savings Rate
+    savings_rate = (net / income * 100) if income > 0 else 0.0
+    
+    # 5. Safe to Spend
+    # (Income - Fixed Expenses - Savings Goal (20% default))
+    savings_goal = income * 0.20
+    safe_to_spend = income - fixed_expenses_total - savings_goal - (spend - fixed_expenses_total) 
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    col1.metric("💰 Income (This Month)", f"${income:,.0f}", delta_color="normal")
+    col2.metric("💸 Spent (This Month)", f"${spend:,.0f}", delta=f"-${spend:,.0f}", delta_color="inverse")
+    col3.metric("📉 Savings Rate", f"{savings_rate:.1f}%", delta="Target: 20%")
+    col4.metric("🛡️ Safe to Spend", f"${max(0, safe_to_spend):,.0f}", help="Income - Fixed Bills - 20% Savings - Already Spent")
 
-    sections = [
-        ("KPIs", _kpis(df)),
-        ("Spending by Category", cat_spend(df)),
-        ("Income vs. Expenses", income_vs_expense_monthly(df)),
-        ("Net Cash Flow", net_cashflow_month(df)),
-        ("Top Merchants", top_merchants(df)),
-        ("Recurring vs One-time", recurring_vs_onetime(df)),
-    ]
+    # Progress Bar for Budget (Simple 50/30/20 rule visualization)
+    st.caption("Monthly Budget Progress")
+    progress = min(1.0, spend / income) if income > 0 else 0
+    st.progress(progress)
 
-    html_parts = [
-        "<html><head><meta charset='utf-8'><title>Personal Finance Dashboard</title></head><body>",
-        "<h1 style='font-family:system-ui;margin:12px 16px'>Personal Finance Dashboard</h1>",
-        "<p style='font-family:system-ui;margin:0 16px 12px'>Tip: use the legend to isolate a category; drag or use the range slider on time charts; use the search box below to filter recent transactions.</p>"
-    ]
-    for title, fig in sections:
-        html_parts.append(f"<h2 style='font-family:system-ui;margin:12px 16px 0'>{title}</h2>")
-        html_parts.append(fig.to_html(full_html=False, include_plotlyjs='cdn'))
 
-    # Recent transactions with client-side search
-    html_parts.append("<h2 style='font-family:system-ui;margin:12px 16px 0'>Recent Transactions</h2>")
-    html_parts.append(recent_table_html(df, n=250))
+def income_vs_expense_monthly(df):
+    """
+    Bar chart of Income vs Expenses per month.
+    """
+    # Group by Month and Type (Pos/Neg)
+    monthly = df.groupby('Month')['Amount'].agg(
+        Income=lambda x: x[x > 0].sum(),
+        Expense=lambda x: abs(x[x < 0].sum())
+    ).reset_index()
+    
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=monthly['Month'], y=monthly['Income'], name='Income', marker_color='#4CAF50'))
+    fig.add_trace(go.Bar(x=monthly['Month'], y=monthly['Expense'], name='Expenses', marker_color='#FF5252'))
+    
+    fig.update_layout(barmode='group', title="Income vs Expenses Trend", height=400)
+    return fig
 
-    html_parts.append("</body></html>")
-    Path(out_html).write_text("\n".join(html_parts), encoding="utf-8")
+def cat_spend(df):
+    """
+    Donut chart of spending by category (excluding Income/Transfers).
+    """
+    # Filter out income and transfers
+    spend_df = df[(df['Amount'] < 0) & (~df['Category'].isin(['Transfer', 'Payment', 'Income']))].copy()
+    spend_df['Amount'] = abs(spend_df['Amount'])
+    
+    by_cat = spend_df.groupby('Category')['Amount'].sum().reset_index()
+    
+    fig = px.pie(by_cat, values='Amount', names='Category', hole=0.4, title="Spending by Category")
+    fig.update_traces(textposition='inside', textinfo='percent+label')
+    return fig
 
-# Backward-compat wrapper
-def generate_dashboard(categorized_csv: str, out_html: str) -> None:
-    build_dashboard(categorized_csv, out_html)
+def net_worth_trend(df):
+    """
+    Area chart of Net Worth (Cumulative Cashflow) over time.
+    """
+    # Calculate daily net change
+    daily = df.groupby('Date')['Amount'].sum().cumsum().reset_index()
+    daily.rename(columns={'Amount': 'Net Worth'}, inplace=True)
+    
+    fig = px.area(daily, x='Date', y='Net Worth', title="Net Worth Growth (Cash Assets)")
+    fig.update_layout(height=350)
+    return fig
 
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
-    build_dashboard(args.csv, args.out)

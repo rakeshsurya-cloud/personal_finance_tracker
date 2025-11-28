@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables
+.env
+secrets/
+
+# Database
+*.db
+*.sqlite3
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+# IDE
+.vscode/
+.idea/
+
+# Data (Exclude raw bank data)
+bank_data/
+output/
