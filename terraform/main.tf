@@ -1,13 +1,4 @@
 terraform {
-  # --- Terraform Cloud Configuration ---
-  # Uncomment and update this block to use Terraform Cloud
-  # cloud {
-  #   organization = "YOUR_ORG_NAME"
-  #   workspaces {
-  #     name = "finance-tracker-prod"
-  #   }
-  # }
-
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -22,7 +13,7 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-west-2"
+  region = var.aws_region
 }
 
 resource "random_password" "db_password" {
@@ -60,7 +51,7 @@ data "aws_ami" "amazon_linux" {
   }
 }
 
-# Get the default VPC
+# Use the default VPC for cost-free networking primitives
 data "aws_vpc" "default" {
   default = true
 }
@@ -104,37 +95,18 @@ resource "aws_route_table_association" "private_b" {
 # Get a public subnet in the default VPC
 data "aws_subnet" "default" {
   vpc_id            = data.aws_vpc.default.id
-  availability_zone = "us-west-2a"
+  availability_zone = var.default_public_subnet_az
   default_for_az    = true
 }
 
-resource "aws_security_group" "finance_app_sg" {
-  name        = "finance_app_sg"
-  description = "Allow SSH and Streamlit traffic"
-  vpc_id      = data.aws_vpc.default.id
+module "networking" {
+  source = "./modules/networking"
 
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  ingress {
-    description = "Streamlit"
-    from_port   = 8501
-    to_port     = 8501
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  vpc_id                = data.aws_vpc.default.id
+  availability_zone_a   = var.availability_zone_a
+  availability_zone_b   = var.availability_zone_b
+  private_subnet_a_cidr = var.private_subnet_a_cidr
+  private_subnet_b_cidr = var.private_subnet_b_cidr
 }
 
 resource "aws_security_group" "rds" {
@@ -162,26 +134,20 @@ resource "aws_security_group" "rds" {
 resource "aws_iam_role" "ssm_role" {
   name = "finance-app-ssm-role"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ec2.amazonaws.com"
-      }
-    }]
-  })
+  vpc_id           = data.aws_vpc.default.id
+  app_port         = var.app_port
+  app_ingress_cidr = var.app_ingress_cidr
 }
 
-resource "aws_iam_role_policy_attachment" "ssm_policy" {
-  role       = aws_iam_role.ssm_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-}
+module "database" {
+  source = "./modules/database"
 
-resource "aws_iam_instance_profile" "ssm_profile" {
-  name = "finance-app-ssm-profile"
-  role = aws_iam_role.ssm_role.name
+  db_name           = var.db_name
+  db_username       = var.db_username
+  db_password       = random_password.db_password.result
+  kms_key_arn       = var.db_kms_key_arn
+  subnet_ids        = module.networking.private_subnet_ids
+  security_group_id = module.security.rds_security_group_id
 }
 
 resource "aws_db_subnet_group" "finance_rds" {
@@ -237,28 +203,11 @@ resource "aws_instance" "app_server" {
     volume_type = "gp3"
   }
 
-  user_data = <<-EOF
-              #!/bin/bash
-              dnf update -y
-              dnf install -y python3.11 python3.11-pip git amazon-ssm-agent
-
-              systemctl enable amazon-ssm-agent
-              systemctl start amazon-ssm-agent
-
-              git clone https://github.com/rakeshsurya-cloud/personal_finance_tracker.git /home/ec2-user/app
-              cd /home/ec2-user/app
-              
-              # Install dependencies with Python 3.11
-              python3.11 -m pip install -r requirements.txt
-              
-              # Setup Systemd Service
-              cp finance-app.service /etc/systemd/system/finance-app.service
-              systemctl daemon-reload
-              systemctl enable finance-app
-              systemctl start finance-app
-              EOF
-
-  tags = {
-    Name = "FinanceAppServer"
-  }
+  subnet_id             = data.aws_subnet.default_public.id
+  security_group_id     = module.security.app_security_group_id
+  instance_type         = var.instance_type
+  app_port              = var.app_port
+  app_repository_url    = var.app_repository_url
+  root_volume_size_gb   = var.root_volume_size_gb
+  availability_zone     = var.default_public_subnet_az
 }
