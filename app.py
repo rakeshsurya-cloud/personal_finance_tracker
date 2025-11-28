@@ -16,7 +16,14 @@ from process_transactions import process_files, save_to_db
 from plaid_integration import create_link_token, exchange_public_token, fetch_transactions
 from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_worth_trend
 from loans import _prep_loans, simulate_payoff
-from insights import detect_anomalies, predict_spending
+from insights import (
+    assistant_response,
+    compute_highlights,
+    detect_anomalies,
+    generate_actionable_tips,
+    predict_spending,
+    summarize_budget_watch,
+)
 
 # --- Configuration ---
 st.set_page_config(page_title="Family Finance Tracker", layout="wide", page_icon="💰")
@@ -585,6 +592,7 @@ with st.sidebar:
     st.header("Data Management")
 
     if is_admin():
+        db_sidebar = get_db()
         # File Upload
         uploaded_files = st.file_uploader(
             "Upload Bank CSVs",
@@ -965,22 +973,104 @@ with tab3:
 
 with tab5:
     st.header("🧠 Smart Insights")
-    
-    if not df_prep.empty:
-        from insights import generate_actionable_tips
-        tips = generate_actionable_tips(df_prep)
-        
+
+    if df_prep.empty:
+        st.info("Need transaction data to generate insights.")
+    else:
+        st.caption("Curated highlights, budget watch-outs, and an on-page assistant to make this page actually smart.")
+
+        col_range, _ = st.columns([3, 1])
+        with col_range:
+            window_label = st.selectbox(
+                "Timeframe",
+                ["Last 90 days", "Last 180 days", "Year to date", "All data"],
+                index=1,
+                help="Insights will be generated from this window."
+            )
+
+        filtered_df = df_prep.copy()
+        cutoff = None
+        today = filtered_df["Date"].max()
+        if window_label == "Last 90 days":
+            cutoff = today - pd.Timedelta(days=90)
+        elif window_label == "Last 180 days":
+            cutoff = today - pd.Timedelta(days=180)
+        elif window_label == "Year to date":
+            cutoff = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
+
+        if cutoff:
+            filtered_df = filtered_df[filtered_df["Date"] >= cutoff]
+
+        if filtered_df.empty:
+            st.info("No data in the selected window. Try expanding the timeframe.")
+            st.stop()
+
+        highlights = compute_highlights(filtered_df)
+        st.subheader("Highlights")
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Income", f"${highlights['income']:,.0f}", help=f"Latest month: {highlights['month']}")
+        h2.metric("Spend", f"${highlights['spend']:,.0f}")
+        h3.metric("Net Cashflow", f"${highlights['net']:,.0f}", delta_color="normal")
+        top_cat = highlights.get("top_category") or "—"
+        top_val = highlights.get("top_category_spend", 0)
+        h4.metric("Top Category", top_cat, delta=f"-${top_val:,.0f}" if top_cat != "—" else None)
+
+        st.subheader("Actionable Tips")
+        tips = generate_actionable_tips(filtered_df)
         if tips:
             for tip in tips:
-                st.markdown(f"""
-                <div style="padding:15px; background-color:#f0f2f6; border-radius:10px; margin-bottom:10px">
-                    {tip}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f"""
+                    <div style="padding:15px; background-color:#f8fafc; border-radius:10px; margin-bottom:10px; border:1px solid #e2e8f0">{tip}</div>
+                    """,
+                    unsafe_allow_html=True,
+                )
         else:
             st.success("✅ Your finances look stable! No alerts this month.")
-            
+
+        st.subheader("Anomalies & Unusual Activity")
+        anomalies = detect_anomalies(filtered_df)
+        if not anomalies.empty:
+            show_cols = ["Date", "Description", "Amount", "Category"]
+            st.dataframe(anomalies[show_cols].assign(Amount=anomalies["Amount"].abs()), use_container_width=True)
+            st.caption("Transactions more than 2 standard deviations from your normal spend.")
+        else:
+            st.info("No suspicious spikes detected in the selected window.")
+
+        st.subheader("Budget Watch")
+        budget_alerts = summarize_budget_watch(budget_status)
+        if budget_alerts:
+            for alert in budget_alerts:
+                st.warning(alert)
+        else:
+            st.success("No budgets are at risk right now.")
+
         st.subheader("🔮 Spending Forecast")
-        st.plotly_chart(predict_spending(df_prep), use_container_width=True)
-    else:
-        st.info("Need transaction data to generate insights.")
+        forecast = predict_spending(filtered_df)
+        st.plotly_chart(forecast["figure"], use_container_width=True)
+        st.caption(forecast.get("summary", ""))
+        if forecast.get("forecast_month"):
+            st.caption(f"Next update based on data through {forecast['forecast_month']} (refreshed {forecast['updated_at']:%Y-%m-%d %H:%M UTC}).")
+
+        st.subheader("💬 AI Insights Assistant")
+        with st.form("insights_assistant"):
+            prompt = st.text_area(
+                "Ask a question about your money",
+                placeholder="e.g., Where can I trim spend this month?",
+                help="Uses on-page data only; no external calls."
+            )
+            submitted = st.form_submit_button("Ask the Assistant")
+
+        if submitted:
+            response = assistant_response(filtered_df, prompt, budget_status, forecast, anomalies)
+            formatted_response = response.replace("\n", "<br>")
+            st.markdown(
+                f"""
+                <div style="padding:15px; background-color:#eef2ff; border-radius:10px; border:1px solid #c7d2fe">
+                    {formatted_response}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("Try asking: • What changed most this month? • How do I avoid overspending this week? • Where is my biggest category drift?")
