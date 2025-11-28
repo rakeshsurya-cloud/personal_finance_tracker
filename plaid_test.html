@@ -4,22 +4,22 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plaid Link Helper</title>
+    <title>Plaid Link Sandbox</title>
     <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js"></script>
     <style>
         body {
             font-family: sans-serif;
-            padding: 40px;
-            max-width: 600px;
-            margin: 0 auto;
-            background: #f4f4f9;
+            padding: 20px;
+            background: #f0f2f5;
         }
 
         .container {
+            max-width: 600px;
+            margin: 0 auto;
             background: white;
             padding: 30px;
             border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
 
         input {
@@ -31,18 +31,18 @@
         }
 
         button {
-            background: #000;
+            background: #08cac1;
             color: white;
-            padding: 12px 20px;
             border: none;
+            padding: 10px 20px;
             border-radius: 4px;
             cursor: pointer;
-            width: 100%;
             font-size: 16px;
+            width: 100%;
         }
 
         button:hover {
-            background: #333;
+            background: #07b2aa;
         }
 
         #result {
@@ -55,52 +55,61 @@
             word-break: break-all;
         }
 
-        label {
-            font-weight: bold;
-            display: block;
-            margin-top: 15px;
+        .step {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
         }
     </style>
 </head>
 
 <body>
     <div class="container">
-        <h2>🔗 Plaid Link Helper</h2>
-        <p>Use this tool to connect your bank and generate a <b>Public Token</b> for the app.</p>
+        <h2>🔗 Plaid Link Sandbox Helper</h2>
 
-        <label>link-sandbox-e4ca8e73-c22d-4a27-9028-894455e422d4:</label>
-        <input type="text" id="link_token" placeholder="link-sandbox-...">
-
-        <button id="linkButton">Open Plaid Link</button>
+        <div class="step">
+            <h3>Step 1: Enter Link Token</h3>
+            <p>Paste the Link Token generated from your Streamlit app:</p>
+            <input type="text" id="linkToken" placeholder="link-sandbox-...">
+            <button onclick="startLink()">Open Plaid Link</button>
+        </div>
 
         <div id="result">
-            <label>✅ Success! Copy this Public Token:</label>
-            <code id="public_token"></code>
+            <h3>✅ Success!</h3>
+            <p><strong>Public Token:</strong></p>
+            <code id="publicToken"></code>
+            <p style="margin-top: 10px; font-size: 14px; color: #666;">Copy this token and paste it back into the
+                Streamlit app to complete the connection.</p>
         </div>
     </div>
 
     <script>
-        document.getElementById('linkButton').onclick = function () {
-            const token = document.getElementById('link_token').value;
-            if (!token) { alert("Please paste a Link Token first!"); return; }
+        function startLink() {
+            const token = document.getElementById('linkToken').value.trim();
+            if (!token) {
+                alert('Please enter a Link Token');
+                return;
+            }
 
             const handler = Plaid.create({
                 token: token,
-                onSuccess: function (public_token, metadata) {
+                onSuccess: (public_token, metadata) => {
                     document.getElementById('result').style.display = 'block';
-                    document.getElementById('public_token').innerText = public_token;
+                    document.getElementById('publicToken').innerText = public_token;
                     console.log('Public Token:', public_token);
                 },
-                onLoad: function () { },
-                onExit: function (err, metadata) {
+                onLoad: () => { console.log('Plaid Link loaded'); },
+                onExit: (err, metadata) => {
                     if (err != null) {
-                        alert("Error: " + err.error_message);
+                        console.error(err);
+                        alert('Error: ' + err.message);
                     }
                 },
-                onEvent: function (eventName, metadata) { },
+                onEvent: (eventName, metadata) => { console.log(eventName, metadata); }
             });
+
             handler.open();
-        };
+        }
     </script>
 </body>
 

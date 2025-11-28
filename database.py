@@ -91,6 +91,16 @@ class CategoryBudget(Base):
     monthly_limit = Column(Float)
     is_shared = Column(Boolean, default=True)
 
+class NetWorthSnapshot(Base):
+    __tablename__ = "net_worth_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(Date, unique=True)
+    total_assets = Column(Float)
+    total_liabilities = Column(Float)
+    net_worth = Column(Float)
+
+
 # --- Init DB ---
 def init_db():
     Base.metadata.create_all(bind=engine)

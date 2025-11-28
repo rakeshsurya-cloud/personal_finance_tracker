@@ -11,7 +11,7 @@ from datetime import datetime
 # Add current directory to path
 sys.path.append(str(Path(__file__).parent))
 
-from database import SessionLocal, User, Transaction, Loan, FixedExpense, PlaidItem, CategoryBudget, init_db
+from database import SessionLocal, User, Transaction, Loan, FixedExpense, PlaidItem, CategoryBudget, NetWorthSnapshot, init_db
 from process_transactions import process_files, save_to_db
 from plaid_integration import create_link_token, exchange_public_token, fetch_transactions
 from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_worth_trend
@@ -516,10 +516,10 @@ def sync_plaid_transactions(item: PlaidItem, share_with_family: bool = True):
                 pf_category = t["personal_finance_category"].get("primary")
             category_value = pf_category or (category_list[0] if category_list else "Uncategorized")
 
-            # Treat non-income as negative for downstream expense calculations
+            # Plaid convention: Positive = Expense, Negative = Income
+            # Our App convention: Positive = Income, Negative = Expense
             raw_amount = t.get("amount", 0)
-            is_income = (pf_category or "").lower() == "income"
-            signed_amount = raw_amount if is_income else -abs(raw_amount)
+            signed_amount = -raw_amount
 
             new_txn = Transaction(
                 date=pd.to_datetime(t.get("date")).date(),
@@ -700,7 +700,71 @@ visible_budgets = [b for b in budgets_all if is_admin() or b.is_shared]
 budget_status = compute_budget_status(df_prep, visible_budgets)
 
 # Tabs (removed Connect tab - moved to sidebar)
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Dashboard", "💳 Transactions", "💸 Loans", "📅 Fixed Expenses", "🧠 Insights"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "💳 Transactions", "💸 Loans", "📅 Fixed Expenses", "🧠 Insights", "📈 Net Worth"])
+
+with tab6:
+    st.header("📈 Net Worth History")
+    
+    db = get_db()
+    
+    # Calculate Current Net Worth
+    # Assets: Sum of positive balances (simplified: sum of all positive transactions + manual assets if we had them)
+    # For now, let's assume Assets = Sum of all Income - Sum of all Expenses (Cash Flow) + Initial Balance (0)
+    # A better way for a simple tracker: Assets = Sum of all positive transactions? No, that's income.
+    # Let's define Assets as: Sum of all transactions (Cash on Hand)
+    # Liabilities: Sum of all Loan Balances
+    
+    # 1. Cash on Hand (Assets)
+    all_txns = db.query(Transaction).all()
+    cash_on_hand = sum(t.amount for t in all_txns)
+    
+    # 2. Liabilities
+    all_loans = db.query(Loan).all()
+    total_liabilities = sum(l.balance for l in all_loans)
+    
+    current_net_worth = cash_on_hand - total_liabilities
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Assets (Cash)", f"${cash_on_hand:,.2f}")
+    col2.metric("Total Liabilities (Debt)", f"${total_liabilities:,.2f}", delta_color="inverse")
+    col3.metric("Net Worth", f"${current_net_worth:,.2f}")
+    
+    st.divider()
+    
+    # Capture Snapshot
+    if is_admin():
+        if st.button("📸 Capture Today's Snapshot"):
+            today = datetime.now().date()
+            existing = db.query(NetWorthSnapshot).filter(NetWorthSnapshot.date == today).first()
+            if existing:
+                existing.total_assets = cash_on_hand
+                existing.total_liabilities = total_liabilities
+                existing.net_worth = current_net_worth
+                st.success("Updated today's snapshot!")
+            else:
+                snap = NetWorthSnapshot(date=today, total_assets=cash_on_hand, total_liabilities=total_liabilities, net_worth=current_net_worth)
+                db.add(snap)
+                st.success("Captured new snapshot!")
+            db.commit()
+            st.rerun()
+            
+    # History Chart
+    snapshots = db.query(NetWorthSnapshot).order_by(NetWorthSnapshot.date).all()
+    if snapshots:
+        data = [{
+            "Date": s.date,
+            "Net Worth": s.net_worth,
+            "Assets": s.total_assets,
+            "Liabilities": s.total_liabilities
+        } for s in snapshots]
+        df_nw = pd.DataFrame(data)
+        
+        fig = px.area(df_nw, x="Date", y="Net Worth", title="Net Worth Trend", markers=True)
+        fig.add_scatter(x=df_nw["Date"], y=df_nw["Assets"], mode='lines', name='Assets', line=dict(dash='dot', color='green'))
+        fig.add_scatter(x=df_nw["Date"], y=df_nw["Liabilities"], mode='lines', name='Liabilities', line=dict(dash='dot', color='red'))
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No snapshots yet. Click 'Capture' to start tracking your history.")
 
 with tab4:
     st.header("📅 Fixed Expenses & Budgeting")
@@ -745,7 +809,7 @@ with tab4:
             color = 'red' if val == 'Critical' else 'orange' if val == 'High' else 'green'
             return f'color: {color}'
 
-        st.dataframe(df_exp.style.applymap(color_priority, subset=['Priority']), use_container_width=True)
+        st.dataframe(df_exp.style.map(color_priority, subset=['Priority']), use_container_width=True)
         
         # Total Fixed Cost
         total_fixed = df_exp["Amount"].sum()

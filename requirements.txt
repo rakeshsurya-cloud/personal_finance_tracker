@@ -1,9 +1,7 @@
 streamlit
 pandas
-pandas
 scikit-learn
 plotly
-streamlit
 sqlalchemy
 python-dotenv
 plaid-python

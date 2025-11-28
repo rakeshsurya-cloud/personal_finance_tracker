@@ -167,7 +167,7 @@ def generate_actionable_tips(df):
         )
 
     # 3. Savings Opportunity
-    income = df[df["Month"] == current_month][df["Amount"] > 0]["Amount"].sum()
+    income = df[(df["Month"] == current_month) & (df["Amount"] > 0)]["Amount"].sum()
     curr_spend = df[(df["Month"] == current_month) & (df["Amount"] < 0)]["Amount"].sum()
 
     if income > 0 and (abs(curr_spend) / income) < 0.5:
