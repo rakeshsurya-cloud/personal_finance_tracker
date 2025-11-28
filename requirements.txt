@@ -1,8 +1,13 @@
 streamlit
 pandas
-plotly
+pandas
 scikit-learn
-numpy
+plotly
+streamlit
+sqlalchemy
+python-dotenv
+plaid-python
+bcrypt
 openpyxl
 boto3
 pytest

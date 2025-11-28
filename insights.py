@@ -1,73 +1,96 @@
 import pandas as pd
-import numpy as np
-from sklearn.ensemble import IsolationForest
-from sklearn.linear_model import LinearRegression
-import plotly.graph_objects as go
-import plotly.express as px
+from datetime import datetime, timedelta
 
-def detect_anomalies(df: pd.DataFrame, contamination: float = 0.05) -> pd.DataFrame:
+def detect_anomalies(df):
     """
-    Uses Isolation Forest to detect anomalous transactions based on Amount.
-    Returns the DataFrame with an 'IsAnomaly' column.
-    """
-    if df.empty or len(df) < 10:
-        return df
-    
-    # Prepare data: Use Amount (absolute) for anomaly detection
-    # We focus on expenses for anomalies usually
-    expenses = df[df["Amount"] < 0].copy()
-    if expenses.empty:
-        return df
-        
-    X = expenses[["Amount"]].abs().values.reshape(-1, 1)
-    
-    model = IsolationForest(contamination=contamination, random_state=42)
-    expenses["AnomalyScore"] = model.fit_predict(X)
-    
-    # -1 is anomaly, 1 is normal
-    anomalies = expenses[expenses["AnomalyScore"] == -1]
-    
-    # Merge back to original df
-    df["IsAnomaly"] = False
-    df.loc[anomalies.index, "IsAnomaly"] = True
-    
-    return df
-
-def predict_spending(df: pd.DataFrame) -> go.Figure:
-    """
-    Forecasts next month's total spending using simple Linear Regression on monthly totals.
+    Detects transactions that are > 2 std dev from the mean.
     """
     if df.empty:
-        return go.Figure()
+        return pd.DataFrame()
         
-    # Aggregate by month
-    df["Date"] = pd.to_datetime(df["Date"])
-    monthly = df[df["Amount"] < 0].copy()
-    monthly["Month"] = monthly["Date"].dt.to_period("M").dt.to_timestamp()
-    monthly_spend = monthly.groupby("Month")["Amount"].sum().abs().reset_index()
+    df = df.copy()
+    mean_spend = df[df['Amount'] < 0]['Amount'].mean()
+    std_spend = df[df['Amount'] < 0]['Amount'].std()
     
-    if len(monthly_spend) < 3:
-        return go.Figure().add_annotation(text="Need at least 3 months of data to forecast.", showarrow=False)
+    # Anomaly = Amount < (Mean - 2*Std) (since expenses are negative)
+    threshold = mean_spend - (2 * std_spend)
+    
+    anomalies = df[df['Amount'] < threshold]
+    return anomalies
+
+def predict_spending(df):
+    """
+    Simple linear forecast for next month's spending.
+    """
+    import plotly.express as px
+    
+    # Group by month
+    monthly = df[df['Amount'] < 0].groupby('Month')['Amount'].sum().reset_index()
+    monthly['Amount'] = abs(monthly['Amount'])
+    
+    if len(monthly) < 2:
+        return px.line(title="Not enough data to predict")
         
-    # Prepare for regression
-    monthly_spend["MonthOrdinal"] = monthly_spend["Month"].map(pd.Timestamp.toordinal)
-    X = monthly_spend[["MonthOrdinal"]]
-    y = monthly_spend["Amount"]
+    # Simple average of last 3 months
+    avg_spend = monthly['Amount'].tail(3).mean()
     
-    model = LinearRegression()
-    model.fit(X, y)
+    # Create forecast data
+    last_month = monthly['Month'].max()
+    # Handle string or timestamp
+    try:
+        next_month_date = pd.to_datetime(last_month) + pd.DateOffset(months=1)
+        next_month = next_month_date.strftime("%Y-%m")
+    except:
+        next_month = "Next Month"
+        
+    forecast = pd.DataFrame({
+        'Month': [next_month],
+        'Amount': [avg_spend],
+        'Type': ['Forecast']
+    })
     
-    # Predict next month
-    last_month = monthly_spend["Month"].max()
-    next_month = last_month + pd.DateOffset(months=1)
-    next_month_ordinal = np.array([[next_month.toordinal()]])
-    prediction = model.predict(next_month_ordinal)[0]
+    monthly['Type'] = 'Actual'
+    combined = pd.concat([monthly, forecast])
     
-    # Plot
-    fig = px.line(monthly_spend, x="Month", y="Amount", title="Monthly Spending Trend & Forecast", markers=True)
-    fig.add_scatter(x=[next_month], y=[prediction], mode="markers+text", name="Forecast", 
-                    text=[f"${prediction:,.0f}"], textposition="top center",
-                    marker=dict(color="red", size=12, symbol="star"))
-    
-    fig.update_layout(yaxis_title="Total Spending", xaxis_title="Month")
+    fig = px.line(combined, x='Month', y='Amount', color='Type', markers=True, title="Spending Forecast")
     return fig
+
+def generate_actionable_tips(df):
+    """
+    Generates rule-based financial tips.
+    """
+    tips = []
+    
+    if df.empty:
+        return tips
+        
+    # 1. Spending Spikes
+    current_month = df['Month'].max()
+    # Calculate last month safely
+    try:
+        last_month = (pd.to_datetime(current_month) - pd.DateOffset(months=1)).strftime("%Y-%m")
+    except:
+        last_month = None
+    
+    if last_month:
+        curr_spend = df[(df['Month'] == current_month) & (df['Amount'] < 0)]['Amount'].sum()
+        last_spend = df[(df['Month'] == last_month) & (df['Amount'] < 0)]['Amount'].sum()
+        
+        if abs(curr_spend) > abs(last_spend) * 1.2:
+            tips.append(f"⚠️ **Spending Alert**: You've spent 20% more this month compared to last month.")
+        
+    # 2. High Category Spend
+    cat_spend = df[df['Month'] == current_month].groupby('Category')['Amount'].sum().sort_values()
+    if not cat_spend.empty:
+        top_cat = cat_spend.index[0] # Most negative
+        top_val = abs(cat_spend.iloc[0])
+        tips.append(f"🍔 **Top Category**: You spent ${top_val:,.0f} on **{top_cat}** this month. Can you cut this by 10%?")
+        
+    # 3. Savings Opportunity
+    income = df[df['Month'] == current_month][df['Amount'] > 0]['Amount'].sum()
+    curr_spend = df[(df['Month'] == current_month) & (df['Amount'] < 0)]['Amount'].sum()
+    
+    if income > 0 and (abs(curr_spend) / income) < 0.5:
+        tips.append(f"💰 **Great Job**: You've saved more than 50% of your income this month! Consider investing the surplus.")
+        
+    return tips
