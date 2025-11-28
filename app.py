@@ -17,9 +17,11 @@ from plaid_integration import create_link_token, exchange_public_token, fetch_tr
 from dashboard import _prep, _kpis, cat_spend, income_vs_expense_monthly, net_worth_trend
 from loans import _prep_loans, simulate_payoff
 from insights import (
+    WINDOW_LABELS,
     assistant_response,
     compute_highlights,
     detect_anomalies,
+    filter_by_timeframe,
     generate_actionable_tips,
     predict_spending,
     summarize_budget_watch,
@@ -696,7 +698,25 @@ else:
 db_session = get_db()
 budgets_all = db_session.query(CategoryBudget).all()
 visible_budgets = [b for b in budgets_all if is_admin() or b.is_shared]
-budget_status = compute_budget_status(df_prep, visible_budgets)
+if "analysis_window" not in st.session_state:
+    st.session_state["analysis_window"] = WINDOW_LABELS[1]
+
+with st.sidebar:
+    st.markdown("### Insights timeframe")
+    st.session_state["analysis_window"] = st.selectbox(
+        "Apply timeframe",
+        WINDOW_LABELS,
+        index=WINDOW_LABELS.index(st.session_state["analysis_window"]),
+        help="KPI cards, tips, and the insights assistant will align to this window.",
+        key="analysis_window",
+    )
+
+window_label = st.session_state["analysis_window"]
+analysis_df, window_bounds = filter_by_timeframe(df_prep, window_label)
+
+budget_status = compute_budget_status(analysis_df, visible_budgets)
+fixed_expense_rows = db_session.query(FixedExpense).with_entities(FixedExpense.amount).all()
+fixed_expenses_total_value = sum([x[0] for x in fixed_expense_rows])
 
 # Tabs (removed Connect tab - moved to sidebar)
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 Dashboard", "💳 Transactions", "💸 Loans", "📅 Fixed Expenses", "🧠 Insights", "📈 Net Worth"])
@@ -862,23 +882,25 @@ with tab4:
 
 
 with tab1:
-    if df_prep.empty:
-        st.info("No data available.")
+    db = get_db()
+    if analysis_df.empty:
+        st.info("No data in the selected timeframe. Try widening it from the sidebar.")
     else:
-        # Calculate Total Fixed Expenses
-        fixed_expenses_total = db.query(FixedExpense).with_entities(FixedExpense.amount).all()
-        fixed_total_val = sum([x[0] for x in fixed_expenses_total])
+        _kpis(
+            analysis_df,
+            fixed_expenses_total=fixed_expenses_total_value,
+            window_bounds=window_bounds,
+            window_label=window_label,
+        )
 
-        _kpis(df_prep, fixed_expenses_total=fixed_total_val)
-        
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(cat_spend(df_prep), use_container_width=True)
+            st.plotly_chart(cat_spend(analysis_df), use_container_width=True)
         with col2:
-            st.plotly_chart(income_vs_expense_monthly(df_prep), use_container_width=True)
-            
+            st.plotly_chart(income_vs_expense_monthly(analysis_df), use_container_width=True)
+
         st.subheader("📈 Financial Health")
-        st.plotly_chart(net_worth_trend(df_prep), use_container_width=True)
+        st.plotly_chart(net_worth_trend(analysis_df), use_container_width=True)
 
         if budget_status:
             st.subheader("🎯 Budgets (This Month)")
@@ -1043,27 +1065,7 @@ with tab5:
     else:
         st.caption("Curated highlights, budget watch-outs, and an on-page assistant to make this page actually smart.")
 
-        col_range, _ = st.columns([3, 1])
-        with col_range:
-            window_label = st.selectbox(
-                "Timeframe",
-                ["Last 90 days", "Last 180 days", "Year to date", "All data"],
-                index=1,
-                help="Insights will be generated from this window."
-            )
-
-        filtered_df = df_prep.copy()
-        cutoff = None
-        today = filtered_df["Date"].max()
-        if window_label == "Last 90 days":
-            cutoff = today - pd.Timedelta(days=90)
-        elif window_label == "Last 180 days":
-            cutoff = today - pd.Timedelta(days=180)
-        elif window_label == "Year to date":
-            cutoff = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
-
-        if cutoff:
-            filtered_df = filtered_df[filtered_df["Date"] >= cutoff]
+        filtered_df = analysis_df
 
         if filtered_df.empty:
             st.info("No data in the selected window. Try expanding the timeframe.")
@@ -1079,8 +1081,18 @@ with tab5:
         top_val = highlights.get("top_category_spend", 0)
         h4.metric("Top Category", top_cat, delta=f"-${top_val:,.0f}" if top_cat != "—" else None)
 
+        anomalies = detect_anomalies(filtered_df)
+        forecast = predict_spending(filtered_df)
+
         st.subheader("Actionable Tips")
-        tips = generate_actionable_tips(filtered_df)
+        tips = generate_actionable_tips(
+            filtered_df,
+            budget_status=budget_status,
+            anomalies=anomalies,
+            forecast=forecast,
+            fixed_expenses_total=fixed_expenses_total_value,
+            window_label=window_label,
+        )
         if tips:
             for tip in tips:
                 st.markdown(
@@ -1093,7 +1105,6 @@ with tab5:
             st.success("✅ Your finances look stable! No alerts this month.")
 
         st.subheader("Anomalies & Unusual Activity")
-        anomalies = detect_anomalies(filtered_df)
         if not anomalies.empty:
             show_cols = ["Date", "Description", "Amount", "Category"]
             st.dataframe(anomalies[show_cols].assign(Amount=anomalies["Amount"].abs()), use_container_width=True)
@@ -1110,7 +1121,6 @@ with tab5:
             st.success("No budgets are at risk right now.")
 
         st.subheader("🔮 Spending Forecast")
-        forecast = predict_spending(filtered_df)
         st.plotly_chart(forecast["figure"], use_container_width=True)
         st.caption(forecast.get("summary", ""))
         if forecast.get("forecast_month"):
@@ -1126,7 +1136,15 @@ with tab5:
             submitted = st.form_submit_button("Ask the Assistant")
 
         if submitted:
-            response = assistant_response(filtered_df, prompt, budget_status, forecast, anomalies)
+            response = assistant_response(
+                filtered_df,
+                prompt,
+                budget_status,
+                forecast,
+                anomalies,
+                tips=tips,
+                window_label=window_label,
+            )
             formatted_response = response.replace("\n", "<br>")
             st.markdown(
                 f"""

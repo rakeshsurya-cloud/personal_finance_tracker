@@ -24,3 +24,19 @@ This document outlines how to host the AI financial assistant using the Model Co
 * The current Streamlit app surfaces insights but does **not** yet include the MCP server or on-device LLM runtime; use this guide to stand up those layers alongside the app.
 * Keep API keys and model artifacts outside the repo; mount them as secrets or volumes in deployment.
 * Log tool calls/audit events in the database to trace how insights were generated.
+
+### Quick-start for the new FastAPI MCP server
+The repository now ships a FastAPI implementation of the MCP tool surface in `mcp_server.py`. Run it with:
+
+```bash
+uvicorn mcp_server:app --host 0.0.0.0 --port 8001 --reload
+```
+
+Endpoints:
+- `POST /tools/predict_cash_balance` → rolling daily net × projection minus fixed expenses
+- `POST /tools/calculate_debt_avalanche` → highest-APR-first ordering plus payoff stats when a single loan is provided
+- `POST /tools/get_anomaly_flags` → reuses in-app anomaly detection and returns formatted alerts
+- `POST /tools/calc_required_savings` → goal-based monthly contribution helper
+- `POST /tools/categorize_transaction` → lightweight classifier fallback with keyword heuristics
+
+Wire these endpoints to your MCP agent runtime (e.g., LangGraph or LlamaIndex) and require authentication at the ingress layer.

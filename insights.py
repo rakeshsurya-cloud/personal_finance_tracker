@@ -1,6 +1,6 @@
 import pickle
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from datetime import datetime, timedelta
@@ -132,48 +132,115 @@ def predict_spending(df):
         "updated_at": datetime.utcnow(),
     }
 
-def generate_actionable_tips(df):
-    """
-    Generates rule-based financial tips.
-    """
+def generate_actionable_tips(
+    df: pd.DataFrame,
+    budget_status=None,
+    anomalies: Optional[pd.DataFrame] = None,
+    forecast: Optional[Dict] = None,
+    fixed_expenses_total: float = 0.0,
+    window_label: Optional[str] = None,
+):
+    """Generates richer, timeframe-aware financial tips."""
     tips = []
-    
+
     if df.empty:
         return tips
 
-    # 1. Spending Spikes
     current_month = df["Month"].max()
+    month_df = df[df["Month"] == current_month]
+
+    # 1. Spending Spikes & pacing vs last month
     try:
         last_month = (pd.to_datetime(current_month) - pd.DateOffset(months=1)).strftime("%Y-%m")
     except Exception:
         last_month = None
 
     if last_month:
-        curr_spend = df[(df["Month"] == current_month) & (df["Amount"] < 0)]["Amount"].sum()
+        curr_spend = month_df[month_df["Amount"] < 0]["Amount"].sum()
         last_spend = df[(df["Month"] == last_month) & (df["Amount"] < 0)]["Amount"].sum()
-
         if abs(curr_spend) > abs(last_spend) * 1.2:
             tips.append(
-                "⚠️ **Spending Alert**: You're pacing 20% higher than last month. Consider pausing discretionary spend this week."
+                "⚠️ **Spending Alert**: You're pacing 20%+ higher than last month. Hold discretionary spend for a week and review big-ticket items."
             )
 
-    # 2. High Category Spend
-    cat_spend = df[df["Month"] == current_month].groupby("Category")["Amount"].sum().sort_values()
+    # 2. High Category Spend vs history
+    cat_spend = month_df.groupby("Category")["Amount"].sum().sort_values()
     if not cat_spend.empty:
-        top_cat = cat_spend.index[0]  # Most negative
+        top_cat = cat_spend.index[0]
         top_val = abs(cat_spend.iloc[0])
+        trailing = (
+            df[df["Month"] != current_month]
+            .groupby("Category")["Amount"]
+            .mean()
+            .abs()
+        )
+        trailing_avg = trailing.get(top_cat, 0)
+        if trailing_avg > 0 and top_val > trailing_avg * 1.3:
+            tips.append(
+                f"📈 **{top_cat} is trending hot**: ${top_val:,.0f} vs typical ${trailing_avg:,.0f}. Set a cap for the next 7 days."
+            )
+        else:
+            tips.append(
+                f"🍔 **Top Category**: ${top_val:,.0f} spent on **{top_cat}** this month. Shift one purchase to savings to stay on track."
+            )
+
+    # 3. Budget risks
+    for entry in budget_status or []:
+        if entry["limit"] <= 0:
+            continue
+        pct = entry["pct"]
+        if entry["is_over"]:
+            tips.append(
+                f"🔴 **Budget overrun**: {entry['category']} is over by ${abs(entry['remaining']):,.0f}. Pause spending here for the rest of {window_label or 'the month'}."
+            )
+        elif pct >= 0.8:
+            tips.append(
+                f"🟠 **At risk**: {entry['category']} is {pct*100:.0f}% of its ${entry['limit']:,.0f} limit. Reduce by ${max(0, entry['spent'] - entry['limit']*0.8):,.0f} this week."
+            )
+
+    # 4. Anomalies & duplicates
+    if anomalies is not None and not anomalies.empty:
+        spike = anomalies.iloc[0]
         tips.append(
-            f"🍔 **Top Category**: ${top_val:,.0f} spent on **{top_cat}** this month. Shift a single purchase to savings to stay on track."
+            f"🚨 **Unusual charge**: {spike['Description']} on {spike['Date'].date()} for ${abs(spike['Amount']):,.0f}. Verify this transaction."
         )
 
-    # 3. Savings Opportunity
-    income = df[(df["Month"] == current_month) & (df["Amount"] > 0)]["Amount"].sum()
-    curr_spend = df[(df["Month"] == current_month) & (df["Amount"] < 0)]["Amount"].sum()
-
-    if income > 0 and (abs(curr_spend) / income) < 0.5:
+    dupes = (
+        month_df[month_df["Amount"] < 0]
+        .groupby(["Description", "Amount"])
+        .filter(lambda g: len(g) >= 2)
+        .drop_duplicates(subset=["Description", "Amount"])
+    )
+    if not dupes.empty:
+        d = dupes.iloc[0]
         tips.append(
-            "💰 **Great Job**: You've saved 50%+ of income this month. Move the surplus to your emergency fund or investments."
+            f"🧐 **Possible duplicate**: '{d['Description']}' appears multiple times for ${abs(d['Amount']):,.2f}. Check if this is a repeat charge."
         )
+
+    # 5. Savings rate / runway
+    income = month_df[month_df["Amount"] > 0]["Amount"].sum()
+    spend = abs(month_df[month_df["Amount"] < 0]["Amount"].sum())
+    if income > 0:
+        savings_rate = (income - spend) / income
+        if savings_rate < 0.2:
+            tips.append(
+                f"💸 **Savings gap**: Savings rate is {savings_rate*100:.0f}% (target 20%). Trim discretionary spend by ${max(0, spend - income*0.8):,.0f} to close the gap."
+            )
+
+    if forecast and forecast.get("forecast_value") and income > 0:
+        projected_spend = forecast["forecast_value"]
+        if projected_spend > income:
+            tips.append(
+                f"⏳ **Cash runway risk**: Forecast spend (${projected_spend:,.0f}) exceeds typical income (${income:,.0f}). Lock discretionary categories and pre-schedule transfers to savings."
+            )
+
+    # 6. Fixed expense coverage
+    if fixed_expenses_total > 0 and income > 0:
+        coverage = income - fixed_expenses_total
+        if coverage < 0:
+            tips.append(
+                f"🏠 **Fixed bills exceed income** by ${abs(coverage):,.0f}. Consider renegotiating bills or boosting income immediately."
+            )
 
     return tips
 
@@ -198,8 +265,16 @@ def summarize_budget_watch(budget_status):
     return alerts
 
 
-def assistant_response(df, query: str, budget_status=None, forecast=None, anomalies=None):
-    """Rule-based assistant that tailors a response to the provided question."""
+def assistant_response(
+    df: pd.DataFrame,
+    query: str,
+    budget_status=None,
+    forecast=None,
+    anomalies=None,
+    tips: Optional[List[str]] = None,
+    window_label: Optional[str] = None,
+):
+    """Question-aware assistant that cites the most relevant data points."""
 
     highlights = compute_highlights(df)
     parts = []
@@ -225,10 +300,52 @@ def assistant_response(df, query: str, budget_status=None, forecast=None, anomal
             f"Flagged an unusual charge on {top_anomaly['Date'].date()} for ${abs(top_anomaly['Amount']):,.0f} in {top_anomaly['Category']}."
         )
 
+    # Intent-aware follow ups
+    lower_q = (query or "").lower()
+    if "subscription" in lower_q or "recurring" in lower_q:
+        recurring = df[df["Description"].str.contains("subscr|auto|recurring", case=False, na=False)]
+        if not recurring.empty:
+            total_recurring = recurring[recurring["Amount"] < 0]["Amount"].sum()
+            parts.append(
+                f"Recurring-like charges this window: ${abs(total_recurring):,.0f} across {recurring['Description'].nunique()} merchants."
+            )
+    if "savings" in lower_q or "runway" in lower_q:
+        income = df[df["Amount"] > 0]["Amount"].sum()
+        spend = abs(df[df["Amount"] < 0]["Amount"].sum())
+        if income > 0:
+            rate = (income - spend) / income
+            parts.append(f"Savings rate for {window_label or 'this window'} is {rate*100:.1f}%.")
+    if "debt" in lower_q or "loan" in lower_q:
+        parts.append("For debt payoff, use avalanche ordering and redirect any surplus above fixed bills to the highest APR loan.")
+
+    if tips:
+        parts.append("Next steps: " + " ".join(tips[:3]))
+
     if not parts:
         parts.append("I don't see any major risks right now. Keep following your plan!")
 
-    if query:
-        parts.append(f"You asked: '{query}'. Based on the data above, prioritize categories where spend is rising fastest.")
-
     return "\n\n".join(parts)
+WINDOW_LABELS = ["Last 90 days", "Last 180 days", "Year to date", "All data"]
+
+
+def filter_by_timeframe(df: pd.DataFrame, window_label: str) -> Tuple[pd.DataFrame, Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]]:
+    """Return a dataframe filtered by the requested timeframe plus bounds for downstream metrics."""
+
+    if df.empty:
+        return df, (None, None)
+
+    window_df = df.copy()
+    start = None
+    end = window_df["Date"].max()
+
+    if window_label == "Last 90 days":
+        start = end - pd.Timedelta(days=90)
+    elif window_label == "Last 180 days":
+        start = end - pd.Timedelta(days=180)
+    elif window_label == "Year to date":
+        start = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
+
+    if start is not None:
+        window_df = window_df[window_df["Date"] >= start]
+
+    return window_df, (start, end)
