@@ -37,6 +37,9 @@ def check_login():
         st.session_state["role"] = None
         st.session_state["user_id"] = None
         st.session_state["show_password"] = False
+        st.session_state["failed_attempts"] = []
+        st.session_state["lock_until"] = None
+        st.session_state["preview_as_family"] = False
     
     # If already authenticated, return True immediately
     if st.session_state.get("authenticated", False):
@@ -276,17 +279,35 @@ def check_login():
 
     # Form inputs
     username = st.text_input("Email", placeholder="Enter your email", key="login_user")
-    password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_pass")
+    pass_col, toggle_col = st.columns([4, 1])
+    with pass_col:
+        password = st.text_input(
+            "Password",
+            type="text" if st.session_state.get("show_password") else "password",
+            placeholder="Enter your password",
+            key="login_pass",
+        )
+    with toggle_col:
+        toggle_label = "🙈 Hide" if st.session_state.get("show_password") else "👁️ Show"
+        if st.button(toggle_label, key="toggle_password", type="secondary"):
+            st.session_state["show_password"] = not st.session_state["show_password"]
+            st.rerun()
 
     # Forgot password link
-    st.markdown("""
-    <div style="text-align: right; margin-top: -8px; margin-bottom: 16px;">
-        <a href="#" style="font-size: 14px; color: #9ca3af;">Forgot password?</a>
-    </div>
-    """, unsafe_allow_html=True)
+    if st.button("Forgot password?", key="forgot_pw", type="secondary"):
+        st.info("Password recovery is handled by the support team. Please email support@example.com with your registered email.")
 
     # Sign in button
-    if st.button("Sign In", key="login_btn", type="primary", use_container_width=True):
+    now = time.time()
+    lock_until = st.session_state.get("lock_until")
+    if lock_until and now < lock_until:
+        wait_for = int(lock_until - now)
+        st.error(f"Too many failed attempts. Please wait {wait_for} seconds before trying again.")
+        st.caption("Tip: enable MFA/2FA in your identity provider for added protection.")
+    elif st.button("Sign In", key="login_btn", type="primary", use_container_width=True):
+        # Prune stale attempts (keep last 5 minutes)
+        st.session_state["failed_attempts"] = [t for t in st.session_state.get("failed_attempts", []) if now - t < 300]
+
         db = get_db()
         user = db.query(User).filter(User.username == username).first()
 
@@ -294,22 +315,34 @@ def check_login():
             st.session_state["authenticated"] = True
             st.session_state["role"] = user.role
             st.session_state["user_id"] = user.id
+            st.session_state["failed_attempts"] = []
+            st.session_state["lock_until"] = None
             st.success("✅ Login successful!")
             time.sleep(0.5)
             st.rerun()
         else:
+            st.session_state["failed_attempts"].append(now)
             st.error("❌ Invalid credentials")
+            print(f"Failed login attempt for user {username} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Demo credentials
-    st.markdown("""
-    <div style="text-align: center; margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
-        <p style="color: #6b7280; font-size: 13px; margin: 0; line-height: 1.6;">
-            <strong style="color: #9ca3af;">Demo Credentials:</strong><br>
-            Admin: <span style="color: #08cac1; font-weight: 600;">admin</span> / <span style="color: #08cac1;">admin123</span><br>
-            Family: <span style="color: #08cac1; font-weight: 600;">brother</span> / <span style="color: #08cac1;">brother123</span>
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+            if len(st.session_state["failed_attempts"]) >= 5:
+                st.session_state["lock_until"] = now + 60
+                st.warning("Too many failed attempts. Login temporarily locked for 60 seconds.")
+
+    st.caption("For security, we recommend enabling MFA/2FA on your identity provider.")
+
+    # Demo credentials (hidden unless explicitly allowed)
+    show_demo_creds = os.getenv("SHOW_DEMO_CREDENTIALS", "false").lower() == "true"
+    if show_demo_creds:
+        st.markdown("""
+        <div style="text-align: center; margin-top: 32px; padding-top: 24px; border-top: 1px solid rgba(255, 255, 255, 0.1);">
+            <p style="color: #6b7280; font-size: 13px; margin: 0; line-height: 1.6;">
+                <strong style="color: #9ca3af;">Demo Credentials:</strong><br>
+                Admin: <span style="color: #08cac1; font-weight: 600;">admin</span> / <span style="color: #08cac1;">admin123</span><br>
+                Family: <span style="color: #08cac1; font-weight: 600;">brother</span> / <span style="color: #08cac1;">brother123</span>
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
     # End login card
     st.markdown('</div>', unsafe_allow_html=True)
@@ -399,7 +432,7 @@ st.markdown("""
 
 # Role Helper
 def is_admin():
-    return st.session_state.get("role") == "admin"
+    return st.session_state.get("role") == "admin" and not st.session_state.get("preview_as_family")
 
 # --- Data Loading ---
 def load_data():
@@ -430,12 +463,29 @@ def load_data():
     return df
 
 # --- Main App ---
-st.title(f"💰 Family Finance Tracker ({st.session_state['role'].title()} Mode)")
+current_role = st.session_state.get("role") or "family"
+if st.session_state.get("preview_as_family") and current_role == "admin":
+    display_role = "Family Preview"
+else:
+    display_role = current_role.title()
+
+st.title(f"💰 Family Finance Tracker ({display_role} Mode)")
+
+if not is_admin():
+    st.info("You are viewing shared family data only. Personal transactions remain hidden.")
 
 
 
 # Sidebar
 with st.sidebar:
+    st.header("Access & Roles")
+    st.markdown("Admins can view and edit all data. Family users only see records marked as **Shared**, controlled by the `IsShared` column.")
+    if st.session_state.get("role") == "admin":
+        st.checkbox("Preview as family", key="preview_as_family", help="Temporarily view only shared data to validate visibility.")
+    else:
+        st.caption("You're in family mode—private items stay hidden unless shared.")
+
+    st.divider()
     st.header("Data Management")
     
     if is_admin():
@@ -509,6 +559,9 @@ with st.sidebar:
     st.divider()
     if st.button("🚪 Logout", use_container_width=True):
         st.session_state["authenticated"] = False
+        st.session_state["preview_as_family"] = False
+        st.session_state["role"] = None
+        st.session_state["user_id"] = None
         st.rerun()
 
 # Load Data
